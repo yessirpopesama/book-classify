@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>图书分类 - 上传书籍</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --wx-green: #07C160;
+      --wx-green-hover: #06AD56;
+      --bg: #F7F8FA;
+      --card-bg: #FFFFFF;
+      --text: #191919;
+      --text-secondary: #8E8E93;
+      --border: #E5E5EA;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      min-height: 100vh;
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 560px;
+      margin: 0 auto;
+      padding: 40px 24px;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+    header h1 {
+      font-size: 28px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    header p {
+      font-size: 15px;
+      color: var(--text-secondary);
+    }
+    .upload-zone {
+      background: var(--card-bg);
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 48px 32px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 24px;
+    }
+    .upload-zone:hover, .upload-zone.dragover {
+      border-color: var(--wx-green);
+      background: rgba(7, 193, 96, 0.04);
+    }
+    .upload-zone .icon {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 16px;
+      background: linear-gradient(135deg, #E8F8EE 0%, #D4F0E0 100%);
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+    }
+    .upload-zone .hint {
+      font-size: 16px;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .upload-zone .sub {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    input[type="file"] { display: none; }
+    .file-list {
+      background: var(--card-bg);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+    .file-list .item {
+      display: flex;
+      align-items: center;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 14px;
+    }
+    .file-list .item:last-child { border-bottom: none; }
+    .file-list .item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+    .file-list .item .remove {
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 4px;
+    }
+    .file-list .item .remove:hover { color: #FF3B30; }
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .btn {
+      flex: 1;
+      padding: 14px 24px;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 16px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: inherit;
+    }
+    .btn-primary {
+      background: var(--wx-green);
+      color: white;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--wx-green-hover);
+    }
+    .btn-primary:disabled {
+      background: #C7C7CC;
+      cursor: not-allowed;
+    }
+    .btn-secondary {
+      background: var(--card-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: #F2F2F7; }
+    .status-card {
+      background: var(--card-bg);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 24px;
+      display: none;
+    }
+    .status-card.show { display: block; }
+    .status-card .status { font-size: 15px; margin-bottom: 8px; }
+    .status-card .status.processing { color: #007AFF; }
+    .status-card .status.completed { color: var(--wx-green); }
+    .status-card .status.failed { color: #FF3B30; }
+    .status-card .msg { font-size: 13px; color: var(--text-secondary); }
+    .download-btn {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 10px 20px;
+      background: var(--wx-green);
+      color: white;
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+    .download-btn:hover { background: var(--wx-green-hover); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>图书分类</h1>
+      <p>上传书籍，智能分类，一键下载</p>
+    </header>
+    <div class="upload-zone" id="uploadZone">
+      <div class="icon">📚</div>
+      <div class="hint">点击或拖拽书籍到此处</div>
+      <div class="sub">支持 .txt、.pdf、.epub 格式</div>
+      <input type="file" id="fileInput" multiple accept=".txt,.pdf,.epub">
+    </div>
+    <div class="file-list" id="fileList"></div>
+    <div class="actions">
+      <button class="btn btn-secondary" id="clearBtn">清空</button>
+      <button class="btn btn-primary" id="uploadBtn" disabled>开始上传并分类</button>
+    </div>
+    <div class="status-card" id="statusCard">
+      <div class="status" id="statusText">处理中...</div>
+      <div class="msg" id="statusMsg"></div>
+      <a class="download-btn" id="downloadBtn" href="#" download="results.zip" style="display:none">下载分类结果</a>
+    </div>
+  </div>
+  <script src="/main.js"></script>
+</body>
+</html>

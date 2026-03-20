@@ -15,14 +15,18 @@
 
 ```
 book-distribute/
-├── main.go              # 主程序入口
-├── book_prompts.go      # 生成prompts提示字符串
-├── deepseek_client.go   # DeepSeek API客户端封装
-├── classifier.go        # 分类和文件移动逻辑
-├── go.mod              # Go模块依赖
-├── README.md           # 项目说明文档
-├── source/             # 源文件目录（需要创建）
-└── results/            # 分类结果目录（自动创建）
+├── main.go              # CLI 主程序入口
+├── server/              # 后端 API 服务
+│   └── main.go
+├── frontend/            # 前端页面（微信读书风格）
+│   ├── index.html
+│   ├── main.js
+│   └── package.json
+├── service/             # 核心服务逻辑
+├── start.sh             # 同时启动前后端
+├── run.sh               # CLI 运行脚本
+├── source/              # 源文件目录（CLI 模式）
+└── results/             # 分类结果目录（CLI 模式）
 ```
 
 ## 安装和使用
@@ -60,21 +64,27 @@ mkdir source
 
 ### 4. 运行程序
 
-**重要**: 必须使用以下方式之一运行，不能使用 `go run main.go`（那样只会编译单个文件）：
+#### 方式 A：Web 界面（推荐）
+
+前后端分离，仿微信读书风格的上传界面：
 
 ```bash
-# 方式1: 直接运行（推荐）
-go run .
-
-# 方式2: 使用提供的脚本
-./run.sh
-
-# 方式3: 编译后运行
-go build -o book-classifier .
-./book-classifier
+# 一键启动前端 + 后端
+./start.sh
 ```
 
-**注意**: 如果遇到 `undefined: LoadConfig` 等错误，说明你使用了错误的命令。请使用 `go run .` 而不是 `go run main.go`。
+然后访问 http://localhost:5173 上传书籍，分类完成后可下载打包的 results 压缩包。
+
+#### 方式 B：命令行 (CLI)
+
+```bash
+# 将书籍放入 source 目录后运行
+go run .
+# 或
+./run.sh
+```
+
+**注意**: 必须使用 `go run .` 而不是 `go run main.go`。
 
 ## 工作流程
 
@@ -87,7 +97,7 @@ go build -o book-classifier .
 ## 分类结果
 
 - 成功分类的文件会移动到`results/{分类号}/`目录下
-- 分类失败的文件会移动到`results/uncategorized/`目录下
+- 分类失败的文件会移动到`results/未识别/`目录下
 - 如果目标文件已存在，会自动添加序号避免覆盖
 
 ## 示例
