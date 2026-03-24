@@ -58,9 +58,9 @@ func NewDeepSeekClient(apiKey string) *DeepSeekClient {
 	}
 }
 
-// AnalyzeBook 根据书名和书籍前3页内容，分析并返回分类号、作者、国籍
+// AnalyzeBook 根据书名和正文第一页（约1000字）内容，分析并返回分类号、作者、国籍
 func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysis, error) {
-	systemPrompt := `你是一个专业的图书分类助手。请根据提供的书名和书籍前3页内容，完成以下任务：
+	systemPrompt := `你是一个专业的图书分类助手。请根据提供的书名和正文第一页（约1000字）内容，完成以下任务：
 1. 使用中图法第五版进行分类，给出最合适的中国图书分类法分类号（格式如K837.127）
 2. 分析并确定书籍作者
 3. 分析并确定作者/书籍的国籍
@@ -70,7 +70,7 @@ func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysi
 书籍作者：xxx
 书籍国籍：xxx`
 
-	userContent := fmt.Sprintf("书名：%s\n\n书籍前3页内容：\n%s", bookName, bookContent)
+	userContent := fmt.Sprintf("书名：%s\n\n正文第一页：\n%s", bookName, bookContent)
 	if bookContent == "" {
 		userContent = fmt.Sprintf("书名：%s\n\n（无正文内容，请仅根据书名推断）", bookName)
 	}

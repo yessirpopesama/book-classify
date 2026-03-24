@@ -13,62 +13,63 @@ import (
 	"github.com/wmentor/epub"
 )
 
-// LinesPerPage 每页大约行数（中文书籍通常25-35行/页）
-const LinesPerPage = 35
+// FirstPageChars 正文第一页约字数（用于 API 分析）
+const FirstPageChars = 1000
 
-// PDFPagesToRead PDF 读取页数
-const PDFPagesToRead = 3
-
-// MaxContentChars 发送给API的最大字符数（避免超出token限制）
-const MaxContentChars = 12000
-
-// ReadBookFirstPages 读取书籍前N页内容
-// 支持 .txt、.pdf、.epub，均为前N页
+// ReadBookFirstPages 读取书籍正文第一页（约 FirstPageChars 字）
+// 支持 .txt、.pdf、.epub；pages 参数已废弃，保留仅为兼容调用方
 // 返回: 内容字符串, 是否成功读取, 错误
 func ReadBookFirstPages(filePath string, pages int) (string, bool, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".txt":
-		return readTxtFirstPages(filePath, pages)
+		return readTxtFirstPage(filePath)
 	case ".pdf":
-		return readPDFFirstPages(filePath, PDFPagesToRead)
+		return readPDFFirstPage(filePath)
 	case ".epub":
-		return readEPUBFirstPages(filePath, pages)
+		return readEPUBFirstPage(filePath)
 	default:
 		return "", false, fmt.Errorf("暂不支持的文件格式: %s，支持 .txt、.pdf、.epub", ext)
 	}
 }
 
-// readTxtFirstPages 读取 txt 前 N 页
-func readTxtFirstPages(filePath string, pages int) (string, bool, error) {
+// readTxtFirstPage 读取 txt 正文开头约 FirstPageChars 字
+func readTxtFirstPage(filePath string) (string, bool, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", false, fmt.Errorf("打开文件失败: %w", err)
 	}
 	defer file.Close()
 
-	linesToRead := LinesPerPage * pages
-	var lines []string
+	var sb strings.Builder
 	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() && len(lines) < linesToRead {
-		lines = append(lines, scanner.Text())
+	var runeCount int
+	for scanner.Scan() {
+		line := scanner.Text()
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+			runeCount++
+		}
+		sb.WriteString(line)
+		runeCount += len([]rune(line))
+		if runeCount >= FirstPageChars {
+			break
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		return "", false, fmt.Errorf("读取文件失败: %w", err)
 	}
 
-	if len(lines) == 0 {
+	content := sb.String()
+	if content == "" {
 		return "", true, nil
 	}
-
-	content := strings.Join(lines, "\n")
-	return limitContent(content), true, nil
+	return truncateFirstPage(content), true, nil
 }
 
-// readPDFFirstPages 读取 PDF 前 N 页
-func readPDFFirstPages(filePath string, pages int) (string, bool, error) {
+// readPDFFirstPage 读取 PDF 第一页，再截断至约 FirstPageChars 字
+func readPDFFirstPage(filePath string) (string, bool, error) {
 	f, r, err := pdf.Open(filePath)
 	if err != nil {
 		return "", false, fmt.Errorf("打开PDF失败: %w", err)
@@ -80,14 +81,8 @@ func readPDFFirstPages(filePath string, pages int) (string, bool, error) {
 		return "", true, nil
 	}
 
-	// 尝试按页提取
 	var sb strings.Builder
-	pagesToRead := pages
-	if totalPage < pagesToRead {
-		pagesToRead = totalPage
-	}
-
-	for pageIndex := 1; pageIndex <= pagesToRead; pageIndex++ {
+	for pageIndex := 1; pageIndex <= 1 && pageIndex <= totalPage; pageIndex++ {
 		p := r.Page(pageIndex)
 		rows, err := p.GetTextByRow()
 		if err != nil {
@@ -117,11 +112,11 @@ func readPDFFirstPages(filePath string, pages int) (string, bool, error) {
 	if content == "" {
 		return "", true, nil
 	}
-	return limitContent(content), true, nil
+	return truncateFirstPage(content), true, nil
 }
 
-// readEPUBFirstPages 读取 EPUB 前 N 页内容（EPUB 无页概念，按字符量近似前 N 页）
-func readEPUBFirstPages(filePath string, pages int) (string, bool, error) {
+// readEPUBFirstPage 读取 EPUB 正文开头约 FirstPageChars 字
+func readEPUBFirstPage(filePath string) (string, bool, error) {
 	var buf bytes.Buffer
 	if err := epub.ToTxt(filePath, &buf); err != nil {
 		return "", false, fmt.Errorf("打开EPUB失败: %w", err)
@@ -130,14 +125,14 @@ func readEPUBFirstPages(filePath string, pages int) (string, bool, error) {
 	if content == "" {
 		return "", true, nil
 	}
-	return limitContent(content), true, nil
+	return truncateFirstPage(content), true, nil
 }
 
-// limitContent 限制内容长度
-func limitContent(content string) string {
+// truncateFirstPage 截断为约第一页（FirstPageChars 字）
+func truncateFirstPage(content string) string {
 	runes := []rune(content)
-	if len(runes) > MaxContentChars {
-		return string(runes[:MaxContentChars]) + "\n...(内容已截断)"
+	if len(runes) <= FirstPageChars {
+		return content
 	}
-	return content
+	return string(runes[:FirstPageChars]) + "\n...(已截断)"
 }
