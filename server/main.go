@@ -52,6 +52,7 @@ func main() {
 	http.HandleFunc("/api/classify", cors(handleClassify))
 	http.HandleFunc("/api/status/", cors(handleStatus))
 	http.HandleFunc("/api/download/", cors(handleDownload))
+	http.HandleFunc("/api/results/", cors(handleResults))
 
 	log.Printf("后端服务启动: http://localhost:%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
@@ -229,6 +230,60 @@ func zipDir(src, dest string) error {
 		file.Close()
 		return err
 	})
+}
+
+type ResultRow struct {
+	BookName       string `json:"book_name"`
+	Classification string `json:"classification"`
+	Author         string `json:"author"`
+	Nationality    string `json:"nationality"`
+	Error          string `json:"error,omitempty"`
+}
+
+func handleResults(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimPrefix(r.URL.Path, "/api/results/")
+	taskMu.Lock()
+	ts := taskStatus[taskID]
+	taskMu.Unlock()
+	if ts == nil || ts.Status != "completed" {
+		jsonError(w, "任务未完成或不存在", http.StatusBadRequest)
+		return
+	}
+
+	resultFile := filepath.Join(resultsDir, taskID, "结果.txt")
+	data, err := os.ReadFile(resultFile)
+	if err != nil {
+		jsonError(w, "结果文件不存在", http.StatusNotFound)
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var rows []ResultRow
+	for i, line := range lines {
+		if i < 2 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		for j := range parts {
+			parts[j] = strings.TrimSpace(parts[j])
+		}
+		if len(parts) >= 4 {
+			rows = append(rows, ResultRow{
+				BookName:       parts[0],
+				Classification: parts[1],
+				Author:         parts[2],
+				Nationality:    parts[3],
+			})
+		} else if len(parts) >= 2 {
+			rows = append(rows, ResultRow{
+				BookName: parts[0],
+				Error:    parts[1],
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rows)
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {

@@ -7,10 +7,31 @@ const uploadBtn = document.getElementById('uploadBtn')
 const statusCard = document.getElementById('statusCard')
 const statusText = document.getElementById('statusText')
 const statusMsg = document.getElementById('statusMsg')
+const resultPanel = document.getElementById('resultPanel')
 const downloadBtn = document.getElementById('downloadBtn')
+const loadingOverlay = document.getElementById('loadingOverlay')
+const loadingTitle = document.getElementById('loadingTitle')
+const loadingSub = document.getElementById('loadingSub')
 
 let selectedFiles = []
 const ALLOWED_EXT = ['.txt', '.pdf', '.epub']
+
+function setLoading(show, title, sub) {
+  if (show) {
+    loadingTitle.textContent = title || '正在处理'
+    loadingSub.textContent = sub || '请稍候…'
+    loadingOverlay.classList.add('show')
+    loadingOverlay.setAttribute('aria-hidden', 'false')
+  } else {
+    loadingOverlay.classList.remove('show')
+    loadingOverlay.setAttribute('aria-hidden', 'true')
+  }
+}
+
+function setOverlayText(title, sub) {
+  loadingTitle.textContent = title
+  loadingSub.textContent = sub
+}
 
 uploadZone.addEventListener('click', () => fileInput.click())
 uploadZone.addEventListener('dragover', (e) => {
@@ -56,16 +77,19 @@ clearBtn.addEventListener('click', () => {
   selectedFiles = []
   renderFileList()
   statusCard.classList.remove('show')
+  resultPanel.style.display = 'none'
+  resultPanel.innerHTML = ''
 })
 
 uploadBtn.addEventListener('click', async () => {
   if (selectedFiles.length === 0) return
   uploadBtn.disabled = true
-  statusCard.classList.add('show')
-  statusText.textContent = '上传中...'
-  statusText.className = 'status'
-  statusMsg.textContent = ''
+  statusCard.classList.remove('show')
+  resultPanel.style.display = 'none'
+  resultPanel.innerHTML = ''
   downloadBtn.style.display = 'none'
+
+  setLoading(true, '正在上传', `共 ${selectedFiles.length} 个文件`)
 
   const formData = new FormData()
   selectedFiles.forEach(f => formData.append('files', f))
@@ -79,39 +103,133 @@ uploadBtn.addEventListener('click', async () => {
     if (data.error) throw new Error(data.error)
     const taskId = data.task_id
 
-    statusText.textContent = '正在分类...'
-    statusText.className = 'status processing'
+    setOverlayText('正在智能分类', '分析正文并生成中图法分类号，请稍候…')
 
-    await fetch(API_BASE + '/classify', {
+    const classifyRes = await fetch(API_BASE + '/classify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ task_id: taskId })
     })
-
-    const checkStatus = async () => {
-      const s = await fetch(API_BASE + '/status/' + taskId).then(r => r.json())
-      statusMsg.textContent = s.message
-      if (s.status === 'completed') {
-        statusText.textContent = '分类完成'
-        statusText.className = 'status completed'
-        downloadBtn.href = API_BASE + '/download/' + taskId
-        downloadBtn.style.display = 'inline-block'
-        uploadBtn.disabled = false
-        return
-      }
-      if (s.status === 'failed') {
-        statusText.textContent = '分类失败'
-        statusText.className = 'status failed'
-        uploadBtn.disabled = false
-        return
-      }
-      setTimeout(checkStatus, 1500)
+    if (!classifyRes.ok) {
+      const errBody = await classifyRes.json().catch(() => ({}))
+      throw new Error(errBody.error || '启动分类失败')
     }
-    checkStatus()
+
+    const finalStatus = await new Promise((resolve, reject) => {
+      const poll = async () => {
+        try {
+          const s = await fetch(API_BASE + '/status/' + taskId).then(r => r.json())
+          setOverlayText('正在智能分类', s.message || '处理中…')
+          if (s.status === 'completed') {
+            resolve(s)
+            return
+          }
+          if (s.status === 'failed') {
+            reject(new Error(s.message || '分类失败'))
+            return
+          }
+          setTimeout(poll, 1200)
+        } catch (e) {
+          reject(e)
+        }
+      }
+      poll()
+    })
+
+    setLoading(false)
+    showResultSuccess(taskId, finalStatus)
   } catch (err) {
-    statusText.textContent = '出错'
-    statusText.className = 'status failed'
-    statusMsg.textContent = err.message
+    setLoading(false)
+    showResultError(err.message || String(err))
+  } finally {
     uploadBtn.disabled = false
   }
 })
+
+async function showResultSuccess(taskId, statusObj) {
+  statusCard.classList.add('show')
+  statusText.textContent = '分类完成'
+  statusText.className = 'status completed'
+  statusMsg.textContent = statusObj.message || '所有文件已归类到对应分类目录中。'
+
+  downloadBtn.href = API_BASE + '/download/' + taskId
+  downloadBtn.style.display = 'inline-block'
+
+  try {
+    const res = await fetch(API_BASE + '/results/' + taskId)
+    const rows = await res.json()
+    if (!Array.isArray(rows) || rows.length === 0) {
+      resultPanel.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">暂无分类数据</div>'
+      resultPanel.style.display = 'block'
+      return
+    }
+
+    const successRows = rows.filter(r => !r.error)
+    const errorRows = rows.filter(r => r.error)
+
+    let html = `
+      <div class="result-summary">
+        <div class="stat">总计 <span class="num">${rows.length}</span> 本</div>
+        <div class="stat">成功 <span class="num">${successRows.length}</span></div>
+        <div class="stat">未识别 <span class="num">${errorRows.length}</span></div>
+      </div>
+      <div class="result-table-wrap">
+        <table class="result-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>书名</th>
+              <th>分类号</th>
+              <th>书籍作者</th>
+              <th>书籍国籍</th>
+            </tr>
+          </thead>
+          <tbody>`
+
+    rows.forEach((r, i) => {
+      if (r.error) {
+        html += `
+            <tr>
+              <td>${i + 1}</td>
+              <td title="${esc(r.book_name)}">${esc(r.book_name)}</td>
+              <td class="err-cell" colspan="3">${esc(r.error)}</td>
+            </tr>`
+      } else {
+        html += `
+            <tr>
+              <td>${i + 1}</td>
+              <td title="${esc(r.book_name)}">${esc(r.book_name)}</td>
+              <td class="cls-cell">${esc(r.classification)}</td>
+              <td>${esc(r.author)}</td>
+              <td>${esc(r.nationality)}</td>
+            </tr>`
+      }
+    })
+
+    html += `
+          </tbody>
+        </table>
+      </div>`
+
+    resultPanel.innerHTML = html
+    resultPanel.style.display = 'block'
+  } catch (e) {
+    resultPanel.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">结果加载失败</div>'
+    resultPanel.style.display = 'block'
+  }
+}
+
+function esc(str) {
+  if (!str) return ''
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+function showResultError(msg) {
+  statusCard.classList.add('show')
+  statusText.textContent = '处理失败'
+  statusText.className = 'status failed'
+  statusMsg.textContent = msg || '未知错误'
+  resultPanel.style.display = 'none'
+  resultPanel.innerHTML = ''
+  downloadBtn.style.display = 'none'
+}

@@ -26,7 +26,7 @@
       line-height: 1.5;
     }
     .container {
-      max-width: 560px;
+      max-width: 780px;
       margin: 0 auto;
       padding: 40px 24px;
     }
@@ -158,9 +158,123 @@
       transition: background 0.2s;
     }
     .download-btn:hover { background: var(--wx-green-hover); }
+    .loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: rgba(0, 0, 0, 0.45);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(2px);
+    }
+    .loading-overlay.show { display: flex; }
+    .loading-box {
+      background: var(--card-bg);
+      border-radius: 16px;
+      padding: 36px 48px;
+      text-align: center;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+      min-width: 260px;
+    }
+    .loading-spinner {
+      width: 44px;
+      height: 44px;
+      margin: 0 auto 20px;
+      border: 3px solid var(--border);
+      border-top-color: var(--wx-green);
+      border-radius: 50%;
+      animation: spin 0.85s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .loading-title {
+      font-size: 17px;
+      font-weight: 500;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .loading-sub {
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+    .result-panel {
+      margin-top: 16px;
+    }
+    .result-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      margin-top: 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .result-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .result-table thead {
+      background: #F7F8FA;
+    }
+    .result-table th {
+      padding: 10px 14px;
+      text-align: left;
+      font-weight: 500;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .result-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .result-table tr:last-child td {
+      border-bottom: none;
+    }
+    .result-table tr:hover {
+      background: rgba(7, 193, 96, 0.03);
+    }
+    .result-table .err-cell {
+      color: #FF3B30;
+      font-size: 12px;
+    }
+    .result-table .cls-cell {
+      font-family: 'SF Mono', 'Menlo', monospace;
+      color: #007AFF;
+      font-weight: 500;
+    }
+    .result-summary {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .result-summary .stat {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .result-summary .stat .num {
+      font-weight: 600;
+      color: var(--text);
+    }
   </style>
 </head>
 <body>
+  <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
+    <div class="loading-box">
+      <div class="loading-spinner"></div>
+      <div class="loading-title" id="loadingTitle">正在处理</div>
+      <div class="loading-sub" id="loadingSub">请稍候…</div>
+    </div>
+  </div>
   <div class="container">
     <header>
       <h1>图书分类</h1>
@@ -180,6 +294,7 @@
     <div class="status-card" id="statusCard">
       <div class="status" id="statusText">处理中...</div>
       <div class="msg" id="statusMsg"></div>
+      <div class="result-panel" id="resultPanel" style="display:none"></div>
       <a class="download-btn" id="downloadBtn" href="#" download="results.zip" style="display:none">下载分类结果</a>
     </div>
   </div>
