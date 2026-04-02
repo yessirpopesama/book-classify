@@ -10,6 +10,21 @@ if [ ! -f config.yaml ]; then
   exit 1
 fi
 
+# 释放被占用的端口
+kill_port() {
+  local port=$1
+  local pids
+  pids=$(lsof -ti :"$port" 2>/dev/null)
+  if [ -n "$pids" ]; then
+    echo "端口 $port 被占用 (PID: $pids)，正在释放..."
+    echo "$pids" | xargs kill -9 2>/dev/null
+    sleep 1
+  fi
+}
+
+kill_port 8080
+kill_port 5173
+
 # 启动后端
 echo "启动后端服务 (端口 8080)..."
 go run ./server &

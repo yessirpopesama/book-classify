@@ -14,7 +14,7 @@ const loadingTitle = document.getElementById('loadingTitle')
 const loadingSub = document.getElementById('loadingSub')
 
 let selectedFiles = []
-const ALLOWED_EXT = ['.txt', '.pdf', '.epub']
+const ALLOWED_EXT = ['.txt', '.pdf', '.epub', '.mobi']
 
 function setLoading(show, title, sub) {
   if (show) {

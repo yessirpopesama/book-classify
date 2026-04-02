@@ -29,8 +29,10 @@ func ReadBookFirstPages(filePath string, pages int) (string, bool, error) {
 		return readPDFContent(filePath)
 	case ".epub":
 		return readEPUBContent(filePath)
+	case ".mobi":
+		return readMOBIContent(filePath)
 	default:
-		return "", false, fmt.Errorf("暂不支持的文件格式: %s，支持 .txt、.pdf、.epub", ext)
+		return "", false, fmt.Errorf("暂不支持的文件格式: %s，支持 .txt、.pdf、.epub、.mobi", ext)
 	}
 }
 
@@ -293,6 +295,170 @@ func extractTextFromXHTML(f *zip.File) (string, error) {
 		}
 	}
 	return strings.Join(cleaned, "\n"), nil
+}
+
+// readMOBIContent 解析 MOBI（PalmDB 格式），提取正文文本直到凑满 FirstPageChars 字
+func readMOBIContent(filePath string) (string, bool, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", false, fmt.Errorf("打开MOBI失败: %w", err)
+	}
+	if len(data) < 78+8 {
+		return "", false, fmt.Errorf("MOBI文件过小，不是有效文件")
+	}
+
+	numRecords := int(beUint16(data[76:78]))
+	if numRecords < 2 {
+		return "", true, nil
+	}
+
+	recordOffsets := make([]uint32, numRecords)
+	headerEnd := 78 + numRecords*8
+	if len(data) < headerEnd {
+		return "", false, fmt.Errorf("MOBI文件头部不完整")
+	}
+	for i := 0; i < numRecords; i++ {
+		recordOffsets[i] = beUint32(data[78+i*8 : 78+i*8+4])
+	}
+
+	rec0Start := int(recordOffsets[0])
+	if len(data) < rec0Start+16 {
+		return "", false, fmt.Errorf("MOBI记录0不完整")
+	}
+
+	compression := beUint16(data[rec0Start : rec0Start+2])
+	textRecordCount := int(beUint16(data[rec0Start+8 : rec0Start+10]))
+
+	if textRecordCount <= 0 || textRecordCount >= numRecords {
+		textRecordCount = numRecords - 1
+	}
+
+	// 提取编码信息（MOBI header 在 record0 偏移 16 开始，编码在 +28 处）
+	isUTF8 := false
+	if len(data) >= rec0Start+16+4 {
+		mobiMagic := string(data[rec0Start+16 : rec0Start+20])
+		if mobiMagic == "MOBI" && len(data) >= rec0Start+16+32 {
+			encoding := beUint32(data[rec0Start+16+24 : rec0Start+16+28])
+			isUTF8 = (encoding == 65001)
+		}
+	}
+
+	var raw []byte
+	for i := 1; i <= textRecordCount; i++ {
+		recStart := int(recordOffsets[i])
+		var recEnd int
+		if i+1 < numRecords {
+			recEnd = int(recordOffsets[i+1])
+		} else {
+			recEnd = len(data)
+		}
+		if recStart >= len(data) || recEnd > len(data) || recStart >= recEnd {
+			continue
+		}
+		recData := data[recStart:recEnd]
+
+		switch compression {
+		case 1: // 无压缩
+			raw = append(raw, recData...)
+		case 2: // PalmDOC 压缩
+			decoded := palmDocDecompress(recData)
+			raw = append(raw, decoded...)
+		default:
+			raw = append(raw, recData...)
+		}
+
+		if len(raw) > FirstPageChars*4 {
+			break
+		}
+	}
+
+	var text string
+	if isUTF8 {
+		text = string(raw)
+	} else {
+		text = decodeLatin1(raw)
+	}
+
+	text = htmlTagRe.ReplaceAllString(text, "")
+	text = cleanWhitespace(text)
+
+	if text == "" {
+		return "", true, nil
+	}
+	return truncate(text), true, nil
+}
+
+// --- MOBI helpers ---
+
+func beUint16(b []byte) uint16 {
+	return uint16(b[0])<<8 | uint16(b[1])
+}
+
+func beUint32(b []byte) uint32 {
+	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+}
+
+func palmDocDecompress(input []byte) []byte {
+	var out []byte
+	i := 0
+	for i < len(input) {
+		c := input[i]
+		i++
+		switch {
+		case c == 0:
+			out = append(out, 0)
+		case c >= 1 && c <= 8:
+			n := int(c)
+			end := i + n
+			if end > len(input) {
+				end = len(input)
+			}
+			out = append(out, input[i:end]...)
+			i = end
+		case c >= 0x09 && c <= 0x7F:
+			out = append(out, c)
+		case c >= 0x80 && c <= 0xBF:
+			if i >= len(input) {
+				break
+			}
+			next := input[i]
+			i++
+			dist := ((int(c) << 8) | int(next)) >> 3 & 0x7FF
+			length := int(next)&0x07 + 3
+			pos := len(out) - dist
+			if pos < 0 {
+				pos = 0
+			}
+			for j := 0; j < length; j++ {
+				if pos+j < len(out) {
+					out = append(out, out[pos+j])
+				}
+			}
+		case c >= 0xC0:
+			out = append(out, ' ', c^0x80)
+		}
+	}
+	return out
+}
+
+func decodeLatin1(data []byte) string {
+	runes := make([]rune, len(data))
+	for i, b := range data {
+		runes[i] = rune(b)
+	}
+	return string(runes)
+}
+
+func cleanWhitespace(text string) string {
+	lines := strings.Split(text, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			cleaned = append(cleaned, line)
+		}
+	}
+	return strings.Join(cleaned, "\n")
 }
 
 // truncate 截断为约 FirstPageChars 字

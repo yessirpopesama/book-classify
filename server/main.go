@@ -94,7 +94,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	for _, fh := range files {
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
-		if ext != ".txt" && ext != ".pdf" && ext != ".epub" {
+		if ext != ".txt" && ext != ".pdf" && ext != ".epub" && ext != ".mobi" {
 			continue
 		}
 		f, err := fh.Open()
