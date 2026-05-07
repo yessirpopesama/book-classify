@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	uploadDir   = "data/uploads"
-	resultsDir  = "data/results"
-	port        = "8080"
+	uploadDir    = "data/uploads"
+	resultsDir   = "data/results"
+	port         = "8080"
 	frontendPort = "5173"
 )
 
@@ -43,7 +43,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
-	client = service.NewDeepSeekClient(config.DeepSeekAPIKey)
+	client = service.NewDeepSeekClient(config.DeepSeekAPIKey,
+		time.Duration(config.DeepSeekRequestTimeoutSeconds)*time.Second)
 
 	os.MkdirAll(uploadDir, 0755)
 	os.MkdirAll(resultsDir, 0755)
@@ -149,6 +150,9 @@ func handleClassify(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		os.MkdirAll(taskResultsDir, 0755)
 		err := service.ClassifyAndMove(taskDir, taskResultsDir, client)
+		if rmErr := os.RemoveAll(taskDir); rmErr != nil {
+			log.Printf("清理上传临时目录失败 %s: %v", taskDir, rmErr)
+		}
 		taskMu.Lock()
 		defer taskMu.Unlock()
 		if err != nil {

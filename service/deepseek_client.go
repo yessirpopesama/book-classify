@@ -47,12 +47,19 @@ type ChatResponse struct {
 	} `json:"choices"`
 }
 
-// NewDeepSeekClient 创建新的DeepSeek客户端
-func NewDeepSeekClient(apiKey string) *DeepSeekClient {
+const defaultDeepSeekHTTPTimeout = 3 * time.Minute
+
+// NewDeepSeekClient 创建新的DeepSeek客户端。
+// requestTimeout 为整次 HTTP 调用上限（含连接、发送与读完响应体）；≤0 时用 defaultDeepSeekHTTPTimeout。
+// 原 60s 易在模型较慢或正文较长时在读 body 阶段触发 Client.Timeout。
+func NewDeepSeekClient(apiKey string, requestTimeout time.Duration) *DeepSeekClient {
+	if requestTimeout <= 0 {
+		requestTimeout = defaultDeepSeekHTTPTimeout
+	}
 	return &DeepSeekClient{
 		apiKey: apiKey,
 		client: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: requestTimeout,
 		},
 		apiURL: "https://api.deepseek.com/v1/chat/completions",
 	}

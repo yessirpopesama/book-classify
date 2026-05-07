@@ -213,7 +213,6 @@
       width: 100%;
       border-collapse: collapse;
       font-size: 13px;
-      white-space: nowrap;
     }
     .result-table thead {
       background: #F7F8FA;
@@ -230,9 +229,8 @@
       padding: 10px 14px;
       border-bottom: 1px solid var(--border);
       color: var(--text);
-      max-width: 200px;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      word-break: break-all;
+      user-select: text;
     }
     .result-table tr:last-child td {
       border-bottom: none;
