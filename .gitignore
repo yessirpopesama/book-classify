@@ -15,6 +15,7 @@ book-distribute
 
 # Dependency directories
 vendor/
+node_modules/
 
 # Go workspace file
 go.work
@@ -33,6 +34,7 @@ Thumbs.db
 # Project specific
 source/
 results/
+data/
 result.md
 result.txt
 *.log

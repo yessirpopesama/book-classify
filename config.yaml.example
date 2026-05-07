@@ -1,2 +1,4 @@
 # DeepSeek API配置
 deepseek_api_key: your_api_key_here
+# 可选：单次请求超时（秒），不填则使用程序默认（约 180）
+# deepseek_request_timeout_seconds: 300

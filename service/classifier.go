@@ -8,7 +8,7 @@ import (
 )
 
 // ClassifyAndMove 分类并移动文件
-// 读取每本书前3页，分析作者、国籍，输出分类号、书籍作者、书籍国籍
+// 读取每本书正文第一页（约1000字），分析作者、国籍，输出分类号、书籍作者、书籍国籍
 func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error {
 	// 生成prompts（获取文件列表）
 	_, filePaths, err := GeneratePrompt(sourceDir)
@@ -21,7 +21,7 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error
 		return nil
 	}
 
-	fmt.Printf("找到 %d 个文件，开始分析（读取前3页）...\n", len(filePaths))
+	fmt.Printf("找到 %d 个文件，开始分析（正文第一页约1000字）...\n", len(filePaths))
 
 	// 创建results目录
 	if err := os.MkdirAll(resultsDir, 0755); err != nil {
@@ -43,8 +43,8 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error
 		fullPath := filepath.Join(sourceDir, relPath)
 		fmt.Printf("\n处理文件: %s\n", fullPath)
 
-		// 读取内容（txt、pdf、epub 均为前3页）
-		bookContent, ok, err := ReadBookFirstPages(fullPath, 3)
+		// 读取内容（正文第一页，约1000字）
+		bookContent, ok, err := ReadBookFirstPages(fullPath, 1)
 		if err != nil {
 			fmt.Printf("  无法读取正文（%s），移至未识别文件夹\n", err.Error())
 			moveToUnrecognized(sourceDir, relPath, resultsDir, fileName, &successCount, &failCount)
@@ -118,20 +118,24 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error
 		successCount++
 	}
 
-	// 输出汇总结果到文件
-	outputAnalysisResults(analysisResults)
+	// 输出汇总结果到文件（写入 results 目录）
+	outputPath := filepath.Join(resultsDir, "结果.txt")
+	outputAnalysisResults(analysisResults, outputPath)
 
 	fmt.Printf("\n分类完成！成功: %d, 失败: %d\n", successCount, failCount)
 	return nil
 }
 
-// outputAnalysisResults 将分析结果输出到 结果.txt
+// outputAnalysisResults 将分析结果输出到指定文件
 func outputAnalysisResults(results []struct {
 	fileName string
 	analysis *BookAnalysis
 	err      error
-}) {
-	outputFile := "结果.txt"
+}, outputPath string) {
+	if outputPath == "" {
+		outputPath = "结果.txt"
+	}
+	outputFile := outputPath
 	f, err := os.Create(outputFile)
 	if err != nil {
 		fmt.Printf("无法创建结果文件 %s: %v\n", outputFile, err)
