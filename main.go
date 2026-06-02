@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"book-distribute/service"
 )
@@ -33,8 +32,7 @@ func main() {
 	}
 
 	// 创建DeepSeek客户端
-	client := service.NewDeepSeekClient(apiKey,
-		time.Duration(config.DeepSeekRequestTimeoutSeconds)*time.Second)
+	client := service.NewDeepSeekClient(apiKey)
 
 	// 获取绝对路径
 	absSourceDir, err := filepath.Abs(sourceDir)

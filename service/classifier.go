@@ -7,8 +7,15 @@ import (
 	"strings"
 )
 
+// analysisResultItem 单本书的分析结果
+type analysisResultItem struct {
+	fileName string
+	analysis *BookAnalysis
+	err      error
+}
+
 // ClassifyAndMove 分类并移动文件
-// 读取每本书正文第一页（约1000字），分析作者、国籍，输出分类号、书籍作者、书籍国籍
+// 读取每本书正文第一页（约1000字），分析作者、国籍、分类号及类目层级，输出分类号、书籍作者、书籍国籍
 func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error {
 	// 生成prompts（获取文件列表）
 	_, filePaths, err := GeneratePrompt(sourceDir)
@@ -29,11 +36,7 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error
 	}
 
 	// 收集分析结果用于输出
-	var analysisResults []struct {
-		fileName string
-		analysis *BookAnalysis
-		err      error
-	}
+	var analysisResults []analysisResultItem
 
 	successCount := 0
 	failCount := 0
@@ -48,21 +51,13 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error
 		if err != nil {
 			fmt.Printf("  无法读取正文（%s），移至未识别文件夹\n", err.Error())
 			moveToUnrecognized(sourceDir, relPath, resultsDir, fileName, &successCount, &failCount)
-			analysisResults = append(analysisResults, struct {
-				fileName string
-				analysis *BookAnalysis
-				err      error
-			}{fileName, nil, err})
+			analysisResults = append(analysisResults, analysisResultItem{fileName, nil, err})
 			continue
 		}
 		if !ok || bookContent == "" {
 			fmt.Printf("  无正文内容，移至未识别文件夹\n")
 			moveToUnrecognized(sourceDir, relPath, resultsDir, fileName, &successCount, &failCount)
-			analysisResults = append(analysisResults, struct {
-				fileName string
-				analysis *BookAnalysis
-				err      error
-			}{fileName, nil, fmt.Errorf("未读取到文档内容")})
+			analysisResults = append(analysisResults, analysisResultItem{fileName, nil, fmt.Errorf("未读取到文档内容")})
 			continue
 		}
 		fmt.Printf("  已读取正文（约%d字）\n", len([]rune(bookContent)))
@@ -71,24 +66,23 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error
 		analysis, err := client.AnalyzeBook(fileName, bookContent)
 		if err != nil {
 			fmt.Printf("  分析失败: %v\n", err)
-			analysisResults = append(analysisResults, struct {
-				fileName string
-				analysis *BookAnalysis
-				err      error
-			}{fileName, nil, err})
+			analysisResults = append(analysisResults, analysisResultItem{fileName, nil, err})
 			moveToUnrecognized(sourceDir, relPath, resultsDir, fileName, &successCount, &failCount)
 			continue
 		}
 
-		// 输出三项结果
+		// 输出分析结果
 		fmt.Printf("  分类号: %s\n", analysis.Classification)
+		if analysis.LibraryReference != "" {
+			fmt.Printf("  图书馆参考: %s\n", analysis.LibraryReference)
+		}
+		if analysis.ClassificationPath != "" {
+			fmt.Printf("  最优分类路径: %s\n", analysis.ClassificationPath)
+		}
+		printCategoryHierarchy(analysis.CategoryLevels)
 		fmt.Printf("  书籍作者: %s\n", analysis.Author)
 		fmt.Printf("  书籍国籍: %s\n", analysis.Nationality)
-		analysisResults = append(analysisResults, struct {
-			fileName string
-			analysis *BookAnalysis
-			err      error
-		}{fileName, analysis, nil})
+		analysisResults = append(analysisResults, analysisResultItem{fileName, analysis, nil})
 
 		// 验证分类号
 		classification := strings.TrimSpace(analysis.Classification)
@@ -118,7 +112,7 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error
 		successCount++
 	}
 
-	// 输出汇总结果到文件（写入 results 目录）
+	// 输出汇总结果到文件（含分类号、最优分类路径、作者、国籍）
 	outputPath := filepath.Join(resultsDir, "结果.txt")
 	outputAnalysisResults(analysisResults, outputPath)
 
@@ -126,12 +120,19 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient) error
 	return nil
 }
 
+// printCategoryHierarchy 在控制台打印完整类目层级
+func printCategoryHierarchy(levels []string) {
+	if len(levels) == 0 {
+		return
+	}
+	fmt.Println("  完整类目层级:")
+	for i, level := range levels {
+		fmt.Printf("    %d. %s\n", i+1, level)
+	}
+}
+
 // outputAnalysisResults 将分析结果输出到指定文件
-func outputAnalysisResults(results []struct {
-	fileName string
-	analysis *BookAnalysis
-	err      error
-}, outputPath string) {
+func outputAnalysisResults(results []analysisResultItem, outputPath string) {
 	if outputPath == "" {
 		outputPath = "结果.txt"
 	}
@@ -144,8 +145,8 @@ func outputAnalysisResults(results []struct {
 	defer f.Close()
 
 	// 表头
-	fmt.Fprintf(f, "%-50s\t%-20s\t%-30s\t%-20s\n", "书名", "分类号", "书籍作者", "书籍国籍")
-	fmt.Fprintf(f, "%s\n", strings.Repeat("-", 120))
+	fmt.Fprintf(f, "%-50s\t%-20s\t%-60s\t%-30s\t%-20s\n", "书名", "分类号", "最优分类路径", "书籍作者", "书籍国籍")
+	fmt.Fprintf(f, "%s\n", strings.Repeat("-", 180))
 
 	for _, r := range results {
 		if r.err != nil {
@@ -160,9 +161,14 @@ func outputAnalysisResults(results []struct {
 			fmt.Fprintf(f, "%-50s\t%s\n", r.fileName, "无结果")
 			continue
 		}
-		fmt.Fprintf(f, "%-50s\t%-20s\t%-30s\t%-20s\n",
+		path := r.analysis.ClassificationPath
+		if path == "" && len(r.analysis.CategoryLevels) > 0 {
+			path = strings.Join(r.analysis.CategoryLevels, " > ")
+		}
+		fmt.Fprintf(f, "%-50s\t%-20s\t%-60s\t%-30s\t%-20s\n",
 			r.fileName,
 			r.analysis.Classification,
+			path,
 			r.analysis.Author,
 			r.analysis.Nationality,
 		)

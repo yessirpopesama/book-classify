@@ -79,6 +79,7 @@ clearBtn.addEventListener('click', () => {
   statusCard.classList.remove('show')
   resultPanel.style.display = 'none'
   resultPanel.innerHTML = ''
+  hidePathTooltip()
 })
 
 uploadBtn.addEventListener('click', async () => {
@@ -87,6 +88,7 @@ uploadBtn.addEventListener('click', async () => {
   statusCard.classList.remove('show')
   resultPanel.style.display = 'none'
   resultPanel.innerHTML = ''
+  hidePathTooltip()
   downloadBtn.style.display = 'none'
 
   setLoading(true, '正在上传', `共 ${selectedFiles.length} 个文件`)
@@ -180,6 +182,7 @@ async function showResultSuccess(taskId, statusObj) {
               <th>#</th>
               <th>书名</th>
               <th>分类号</th>
+              <th>最优分类路径</th>
               <th>书籍作者</th>
               <th>书籍国籍</th>
             </tr>
@@ -192,7 +195,7 @@ async function showResultSuccess(taskId, statusObj) {
             <tr>
               <td>${i + 1}</td>
               <td title="${esc(r.book_name)}">${esc(r.book_name)}</td>
-              <td class="err-cell" colspan="3">${esc(r.error)}</td>
+              <td class="err-cell" colspan="4">${esc(r.error)}</td>
             </tr>`
       } else {
         html += `
@@ -200,6 +203,9 @@ async function showResultSuccess(taskId, statusObj) {
               <td>${i + 1}</td>
               <td title="${esc(r.book_name)}">${esc(r.book_name)}</td>
               <td class="cls-cell">${esc(r.classification)}</td>
+              <td class="path-cell" data-path-idx="${i}">
+                <span class="path-text">${esc(r.classification_path)}</span>
+              </td>
               <td>${esc(r.author)}</td>
               <td>${esc(r.nationality)}</td>
             </tr>`
@@ -213,6 +219,7 @@ async function showResultSuccess(taskId, statusObj) {
 
     resultPanel.innerHTML = html
     resultPanel.style.display = 'block'
+    bindPathTooltips(rows)
   } catch (e) {
     resultPanel.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">结果加载失败</div>'
     resultPanel.style.display = 'block'
@@ -222,6 +229,107 @@ async function showResultSuccess(taskId, statusObj) {
 function esc(str) {
   if (!str) return ''
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+let pathTooltipHideTimer = null
+let pathTooltipCurrentText = ''
+
+function hidePathTooltip() {
+  const layer = document.getElementById('pathTooltipLayer')
+  clearTimeout(pathTooltipHideTimer)
+  if (layer) {
+    layer.classList.remove('show')
+    layer.setAttribute('aria-hidden', 'true')
+  }
+}
+
+function bindPathTooltips(rows) {
+  const layer = document.getElementById('pathTooltipLayer')
+  const textEl = document.getElementById('pathTooltipText')
+  const copyBtn = document.getElementById('pathCopyBtn')
+  if (!layer || !textEl || !copyBtn) return
+
+  const hideTooltip = (delay) => {
+    clearTimeout(pathTooltipHideTimer)
+    pathTooltipHideTimer = setTimeout(hidePathTooltip, delay ? 180 : 0)
+  }
+
+  const positionTooltip = (anchor) => {
+    const rect = anchor.getBoundingClientRect()
+    const gap = 8
+    layer.style.left = '0'
+    layer.style.top = '0'
+    layer.classList.add('show')
+    layer.setAttribute('aria-hidden', 'false')
+
+    const tipRect = layer.getBoundingClientRect()
+    let left = rect.left
+    let top = rect.bottom + gap
+
+    if (left + tipRect.width > window.innerWidth - 16) {
+      left = window.innerWidth - tipRect.width - 16
+    }
+    if (left < 16) left = 16
+
+    if (top + tipRect.height > window.innerHeight - 16) {
+      top = rect.top - tipRect.height - gap
+    }
+    if (top < 16) top = 16
+
+    layer.style.left = `${left}px`
+    layer.style.top = `${top}px`
+  }
+
+  const showTooltip = (cell, text) => {
+    clearTimeout(pathTooltipHideTimer)
+    pathTooltipCurrentText = text || ''
+    textEl.textContent = pathTooltipCurrentText || '（无分类路径）'
+    copyBtn.textContent = '复制'
+    copyBtn.classList.remove('copied')
+    copyBtn.disabled = !pathTooltipCurrentText
+    positionTooltip(cell)
+  }
+
+  layer.onmouseenter = () => clearTimeout(pathTooltipHideTimer)
+  layer.onmouseleave = () => hideTooltip(false)
+
+  copyBtn.onclick = async (e) => {
+    e.preventDefault()
+    if (!pathTooltipCurrentText) return
+    const ok = await copyText(pathTooltipCurrentText)
+    if (ok) {
+      copyBtn.textContent = '已复制'
+      copyBtn.classList.add('copied')
+      setTimeout(() => {
+        copyBtn.textContent = '复制'
+        copyBtn.classList.remove('copied')
+      }, 1500)
+    }
+  }
+
+  resultPanel.querySelectorAll('.path-cell[data-path-idx]').forEach(cell => {
+    const idx = +cell.dataset.pathIdx
+    const text = rows[idx]?.classification_path || ''
+    cell.onmouseenter = () => showTooltip(cell, text)
+    cell.onmouseleave = () => hideTooltip(true)
+  })
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.left = '-9999px'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  }
 }
 
 function showResultError(msg) {

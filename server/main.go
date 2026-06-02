@@ -43,8 +43,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
-	client = service.NewDeepSeekClient(config.DeepSeekAPIKey,
-		time.Duration(config.DeepSeekRequestTimeoutSeconds)*time.Second)
+	client = service.NewDeepSeekClient(config.DeepSeekAPIKey)
 
 	os.MkdirAll(uploadDir, 0755)
 	os.MkdirAll(resultsDir, 0755)
@@ -237,11 +236,12 @@ func zipDir(src, dest string) error {
 }
 
 type ResultRow struct {
-	BookName       string `json:"book_name"`
-	Classification string `json:"classification"`
-	Author         string `json:"author"`
-	Nationality    string `json:"nationality"`
-	Error          string `json:"error,omitempty"`
+	BookName           string `json:"book_name"`
+	Classification     string `json:"classification"`
+	ClassificationPath string `json:"classification_path"`
+	Author             string `json:"author"`
+	Nationality        string `json:"nationality"`
+	Error              string `json:"error,omitempty"`
 }
 
 func handleResults(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +271,15 @@ func handleResults(w http.ResponseWriter, r *http.Request) {
 		for j := range parts {
 			parts[j] = strings.TrimSpace(parts[j])
 		}
-		if len(parts) >= 4 {
+		if len(parts) >= 5 {
+			rows = append(rows, ResultRow{
+				BookName:           parts[0],
+				Classification:     parts[1],
+				ClassificationPath: parts[2],
+				Author:             parts[3],
+				Nationality:        parts[4],
+			})
+		} else if len(parts) >= 4 {
 			rows = append(rows, ResultRow{
 				BookName:       parts[0],
 				Classification: parts[1],

@@ -67,7 +67,7 @@ func GeneratePrompt(sourceDir string) (string, []string, error) {
 	}
 
 	// 将所有文件名用换行符连接，最后添加"列表展示如何分类"
-	prompts := strings.Join(allFileNames, "\n") + "\n列表展示如何分类\n使用中图法第五版最新的版本进行分类"
+	prompts := strings.Join(allFileNames, "\n") + "\n列表展示如何分类\n请作为图书管理员，参照全国主要图书馆的中图法著录实践，使用中图法第五版（最新版）对以上书籍分类，并给出最优分类路径与完整类目层级"
 
 	return prompts, allFilePaths, nil
 }

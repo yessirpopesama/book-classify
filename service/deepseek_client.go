@@ -8,14 +8,16 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"time"
 )
 
 // BookAnalysis 书籍分析结果
 type BookAnalysis struct {
-	Classification string `json:"classification"` // 分类号
-	Author         string `json:"author"`         // 书籍作者
-	Nationality    string `json:"nationality"`    // 书籍国籍
+	Classification   string   `json:"classification"`    // 分类号
+	ClassificationPath string `json:"classification_path"` // 最优分类路径
+	CategoryLevels   []string `json:"category_levels"`   // 完整类目层级（从一级到最专指）
+	LibraryReference string   `json:"library_reference"` // 各馆参考分类对照
+	Author           string   `json:"author"`            // 书籍作者
+	Nationality      string   `json:"nationality"`       // 书籍国籍
 }
 
 // DeepSeekClient DeepSeek API客户端
@@ -47,19 +49,12 @@ type ChatResponse struct {
 	} `json:"choices"`
 }
 
-const defaultDeepSeekHTTPTimeout = 3 * time.Minute
-
-// NewDeepSeekClient 创建新的DeepSeek客户端。
-// requestTimeout 为整次 HTTP 调用上限（含连接、发送与读完响应体）；≤0 时用 defaultDeepSeekHTTPTimeout。
-// 原 60s 易在模型较慢或正文较长时在读 body 阶段触发 Client.Timeout。
-func NewDeepSeekClient(apiKey string, requestTimeout time.Duration) *DeepSeekClient {
-	if requestTimeout <= 0 {
-		requestTimeout = defaultDeepSeekHTTPTimeout
-	}
+// NewDeepSeekClient 创建新的 DeepSeek 客户端（不设 HTTP 超时，避免批量分类时被中断）。
+func NewDeepSeekClient(apiKey string) *DeepSeekClient {
 	return &DeepSeekClient{
 		apiKey: apiKey,
 		client: &http.Client{
-			Timeout: requestTimeout,
+			Timeout: 0,
 		},
 		apiURL: "https://api.deepseek.com/v1/chat/completions",
 	}
@@ -67,13 +62,20 @@ func NewDeepSeekClient(apiKey string, requestTimeout time.Duration) *DeepSeekCli
 
 // AnalyzeBook 根据书名和正文第一页（约1000字）内容，分析并返回分类号、作者、国籍
 func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysis, error) {
-	systemPrompt := `你是一个专业的图书分类助手。请根据提供的书名和正文第一页（约1000字）内容，完成以下任务：
-1. 使用中图法第五版进行分类，给出最合适的中国图书分类法分类号（格式如K837.127）
-2. 分析并确定书籍作者
-3. 分析并确定作者/书籍的国籍
+	systemPrompt := `你是一名资深图书管理员，精通《中国图书馆分类法》（中图法）第五版（最新版）及其分类规则。请根据提供的书名和正文第一页（约1000字）内容，完成以下任务：
+
+1. 分类号：以正文内容为主要依据（书名仅作辅助），按中图法第五版选取最贴切的基本类号；需要时可加复分号（如 I242.1、K837.127、R2-52）。
+2. 图书馆参考：参照全国主要图书馆对同类文献的中图法著录惯例（如国家图书馆、上海图书馆、北京大学图书馆、CALIS 联合目录、浙江图书馆、广东省立中山图书馆等），列出 2～4 个可能的分类号及所属层级差异，说明各馆取舍依据。
+3. 最优分类路径：综合各馆实践与文献内容，选定最专指且符合中图法第五版规则的最优类目，给出从一级类到最终类目的完整路径（用 " > " 连接各级，含类号与类名，如 I 文学 > I2 中国文学 > I242 散文、随笔 > I242.1 作品综合集）。
+4. 完整类目层级：列出最优路径上每一级类目，用 " | " 分隔（与最优分类路径层级一一对应）。
+5. 书籍作者：从正文或书名中识别主要作者（编者、译者不作为作者，除非无明确作者）。
+6. 书籍国籍：给出作者所属国家或地区（如中国、美国）。
 
 请严格按照以下格式返回，每行一项，不要有多余内容：
 分类号：xxx
+图书馆参考：xxx
+最优分类路径：xxx
+完整类目层级：xxx
 书籍作者：xxx
 书籍国籍：xxx`
 
@@ -130,21 +132,33 @@ func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysi
 	return parseBookAnalysis(content)
 }
 
-// parseBookAnalysis 从API响应中解析出分类号、作者、国籍
+// parseBookAnalysis 从API响应中解析出分类号、分类路径、层级、作者、国籍
 func parseBookAnalysis(content string) (*BookAnalysis, error) {
 	result := &BookAnalysis{}
 
-	// 匹配 "分类号：" 或 "分类号:" 后的内容
-	patterns := map[string]*string{
-		"分类号":  &result.Classification,
-		"书籍作者": &result.Author,
-		"书籍国籍": &result.Nationality,
+	stringFields := map[string]*string{
+		"分类号":    &result.Classification,
+		"图书馆参考":  &result.LibraryReference,
+		"最优分类路径": &result.ClassificationPath,
+		"书籍作者":   &result.Author,
+		"书籍国籍":   &result.Nationality,
 	}
 
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		for key, dest := range patterns {
+		if strings.HasPrefix(line, "完整类目层级：") || strings.HasPrefix(line, "完整类目层级:") {
+			sep := "："
+			if strings.Contains(line, ":") && !strings.Contains(line, "：") {
+				sep = ":"
+			}
+			parts := strings.SplitN(line, sep, 2)
+			if len(parts) == 2 {
+				result.CategoryLevels = splitCategoryLevels(strings.TrimSpace(parts[1]))
+			}
+			continue
+		}
+		for key, dest := range stringFields {
 			if strings.HasPrefix(line, key+"：") || strings.HasPrefix(line, key+":") {
 				sep := "："
 				if strings.Contains(line, ":") && !strings.Contains(line, "：") {
@@ -159,21 +173,53 @@ func parseBookAnalysis(content string) (*BookAnalysis, error) {
 		}
 	}
 
-	// 备用：正则匹配
-	if result.Classification == "" || result.Author == "" || result.Nationality == "" {
-		reClass := regexp.MustCompile(`分类号[：:]\s*([^\n]+)`)
-		reAuthor := regexp.MustCompile(`书籍作者[：:]\s*([^\n]+)`)
-		reNation := regexp.MustCompile(`书籍国籍[：:]\s*([^\n]+)`)
-		if m := reClass.FindStringSubmatch(content); len(m) > 1 {
-			result.Classification = strings.TrimSpace(m[1])
+	fallback := map[string]*string{
+		`分类号[：:]\s*([^\n]+)`:    &result.Classification,
+		`图书馆参考[：:]\s*([^\n]+)`:  &result.LibraryReference,
+		`最优分类路径[：:]\s*([^\n]+)`: &result.ClassificationPath,
+		`书籍作者[：:]\s*([^\n]+)`:   &result.Author,
+		`书籍国籍[：:]\s*([^\n]+)`:   &result.Nationality,
+	}
+	for pattern, dest := range fallback {
+		if *dest != "" {
+			continue
 		}
-		if m := reAuthor.FindStringSubmatch(content); len(m) > 1 {
-			result.Author = strings.TrimSpace(m[1])
+		re := regexp.MustCompile(pattern)
+		if m := re.FindStringSubmatch(content); len(m) > 1 {
+			*dest = strings.TrimSpace(m[1])
 		}
-		if m := reNation.FindStringSubmatch(content); len(m) > 1 {
-			result.Nationality = strings.TrimSpace(m[1])
+	}
+	if len(result.CategoryLevels) == 0 {
+		reLevels := regexp.MustCompile(`完整类目层级[：:]\s*([^\n]+)`)
+		if m := reLevels.FindStringSubmatch(content); len(m) > 1 {
+			result.CategoryLevels = splitCategoryLevels(strings.TrimSpace(m[1]))
 		}
 	}
 
+	if result.ClassificationPath == "" && len(result.CategoryLevels) > 0 {
+		result.ClassificationPath = strings.Join(result.CategoryLevels, " > ")
+	}
+	if len(result.CategoryLevels) == 0 && result.ClassificationPath != "" {
+		result.CategoryLevels = splitCategoryLevels(strings.ReplaceAll(result.ClassificationPath, ">", "|"))
+	}
+
 	return result, nil
+}
+
+func splitCategoryLevels(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	raw = strings.ReplaceAll(raw, "｜", "|")
+	raw = strings.ReplaceAll(raw, ">", "|")
+	parts := strings.Split(raw, "|")
+	var levels []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			levels = append(levels, p)
+		}
+	}
+	return levels
 }

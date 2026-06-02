@@ -9,8 +9,7 @@ import (
 
 // Config 配置结构
 type Config struct {
-	DeepSeekAPIKey                string `yaml:"deepseek_api_key"`
-	DeepSeekRequestTimeoutSeconds int    `yaml:"deepseek_request_timeout_seconds"` // 0 表示使用客户端默认（约 3 分钟）
+	DeepSeekAPIKey string `yaml:"deepseek_api_key"`
 }
 
 // LoadConfig 从config.yaml加载配置
