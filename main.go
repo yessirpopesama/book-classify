@@ -31,8 +31,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 加载图书馆分类员角色提示词（外置文件，可编辑、持久化）
+	role := service.LoadClassifierRole(config.ClassifierPromptFile)
+
 	// 创建DeepSeek客户端
-	client := service.NewDeepSeekClient(apiKey)
+	client := service.NewDeepSeekClient(apiKey, role)
 
 	// 获取绝对路径
 	absSourceDir, err := filepath.Abs(sourceDir)
@@ -61,7 +64,7 @@ func main() {
 	fmt.Println()
 
 	// 执行分类和移动
-	if err := service.ClassifyAndMove(absSourceDir, absResultsDir, client); err != nil {
+	if err := service.ClassifyAndMove(absSourceDir, absResultsDir, client, config.CLCIndexFile); err != nil {
 		fmt.Printf("分类过程出错: %v\n", err)
 		os.Exit(1)
 	}

@@ -23,8 +23,9 @@ func GeneratePrompt(sourceDir string) (string, []string, error) {
 	// 需要排除的文件列表
 	excludedFiles := map[string]bool{
 		"scan.bat":   true,
-		"结果.txt": true,
-		".DS_Store":  true,
+		"结果.txt":     true,
+		"待进行分类.txt": true,
+		".DS_Store":    true,
 	}
 
 	// 获取sourceDir的绝对路径，用于计算相对路径
@@ -85,8 +86,9 @@ func GenerateCatalog(sourceDir, outputFile string) error {
 	// 需要排除的文件列表
 	excludedFiles := map[string]bool{
 		"scan.bat":   true,
-		"结果.txt": true,
-		".DS_Store":  true,
+		"结果.txt":     true,
+		"待进行分类.txt": true,
+		".DS_Store":    true,
 	}
 
 	// 获取sourceDir的绝对路径，用于计算相对路径

@@ -22,9 +22,10 @@ type BookAnalysis struct {
 
 // DeepSeekClient DeepSeek API客户端
 type DeepSeekClient struct {
-	apiKey string
-	client *http.Client
-	apiURL string
+	apiKey       string
+	client       *http.Client
+	apiURL       string
+	systemPrompt string // 图书馆分类员角色提示词
 }
 
 // ChatMessage 聊天消息结构
@@ -35,10 +36,14 @@ type ChatMessage struct {
 
 // ChatRequest 聊天请求结构
 type ChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Stream      bool          `json:"stream"`
+	Temperature float64       `json:"temperature"`
 }
+
+// classifyTemperature 分类为结构化抽取任务，使用较低温度以保证类目路径稳定、可复现
+const classifyTemperature = 0.1
 
 // ChatResponse 聊天响应结构
 type ChatResponse struct {
@@ -50,34 +55,27 @@ type ChatResponse struct {
 }
 
 // NewDeepSeekClient 创建新的 DeepSeek 客户端（不设 HTTP 超时，避免批量分类时被中断）。
-func NewDeepSeekClient(apiKey string) *DeepSeekClient {
+// systemPrompt 为图书馆分类员角色提示词；为空时回退到内置默认角色。
+func NewDeepSeekClient(apiKey, systemPrompt string) *DeepSeekClient {
+	if strings.TrimSpace(systemPrompt) == "" {
+		systemPrompt = defaultClassifierRole
+	}
 	return &DeepSeekClient{
 		apiKey: apiKey,
 		client: &http.Client{
 			Timeout: 0,
 		},
-		apiURL: "https://api.deepseek.com/v1/chat/completions",
+		apiURL:       "https://api.deepseek.com/v1/chat/completions",
+		systemPrompt: systemPrompt,
 	}
 }
 
 // AnalyzeBook 根据书名和正文第一页（约1000字）内容，分析并返回分类号、作者、国籍
 func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysis, error) {
-	systemPrompt := `你是一名资深图书管理员，精通《中国图书馆分类法》（中图法）第五版（最新版）及其分类规则。请根据提供的书名和正文第一页（约1000字）内容，完成以下任务：
-
-1. 分类号：以正文内容为主要依据（书名仅作辅助），按中图法第五版选取最贴切的基本类号；需要时可加复分号（如 I242.1、K837.127、R2-52）。
-2. 图书馆参考：参照全国主要图书馆对同类文献的中图法著录惯例（如国家图书馆、上海图书馆、北京大学图书馆、CALIS 联合目录、浙江图书馆、广东省立中山图书馆等），列出 2～4 个可能的分类号及所属层级差异，说明各馆取舍依据。
-3. 最优分类路径：综合各馆实践与文献内容，选定最专指且符合中图法第五版规则的最优类目，给出从一级类到最终类目的完整路径（用 " > " 连接各级，含类号与类名，如 I 文学 > I2 中国文学 > I242 散文、随笔 > I242.1 作品综合集）。
-4. 完整类目层级：列出最优路径上每一级类目，用 " | " 分隔（与最优分类路径层级一一对应）。
-5. 书籍作者：从正文或书名中识别主要作者（编者、译者不作为作者，除非无明确作者）。
-6. 书籍国籍：给出作者所属国家或地区（如中国、美国）。
-
-请严格按照以下格式返回，每行一项，不要有多余内容：
-分类号：xxx
-图书馆参考：xxx
-最优分类路径：xxx
-完整类目层级：xxx
-书籍作者：xxx
-书籍国籍：xxx`
+	systemPrompt := c.systemPrompt
+	if strings.TrimSpace(systemPrompt) == "" {
+		systemPrompt = defaultClassifierRole
+	}
 
 	userContent := fmt.Sprintf("书名：%s\n\n正文第一页：\n%s", bookName, bookContent)
 	if bookContent == "" {
@@ -90,9 +88,10 @@ func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysi
 	}
 
 	reqBody := ChatRequest{
-		Model:    "deepseek-chat",
-		Messages: messages,
-		Stream:   false,
+		Model:       "deepseek-chat",
+		Messages:    messages,
+		Stream:      false,
+		Temperature: classifyTemperature,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -129,56 +128,109 @@ func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysi
 	}
 
 	content := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	if content == "" {
+		return nil, fmt.Errorf("API返回内容为空")
+	}
 	return parseBookAnalysis(content)
 }
 
 // parseBookAnalysis 从API响应中解析出分类号、分类路径、层级、作者、国籍
 func parseBookAnalysis(content string) (*BookAnalysis, error) {
 	result := &BookAnalysis{}
+	content = stripModelMarkdown(content)
 
-	stringFields := map[string]*string{
-		"分类号":    &result.Classification,
-		"图书馆参考":  &result.LibraryReference,
-		"最优分类路径": &result.ClassificationPath,
-		"书籍作者":   &result.Author,
-		"书籍国籍":   &result.Nationality,
-	}
-
+	// 多行字段：最优分类路径、图书馆参考 可能较长，支持续行
+	knownKeys := []string{"分类号", "图书馆参考", "最优分类路径", "完整类目层级", "书籍作者", "书籍国籍"}
 	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "完整类目层级：") || strings.HasPrefix(line, "完整类目层级:") {
-			sep := "："
-			if strings.Contains(line, ":") && !strings.Contains(line, "：") {
-				sep = ":"
-			}
-			parts := strings.SplitN(line, sep, 2)
-			if len(parts) == 2 {
-				result.CategoryLevels = splitCategoryLevels(strings.TrimSpace(parts[1]))
-			}
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(stripModelMarkdown(lines[i]))
+		if line == "" {
 			continue
 		}
-		for key, dest := range stringFields {
-			if strings.HasPrefix(line, key+"：") || strings.HasPrefix(line, key+":") {
-				sep := "："
-				if strings.Contains(line, ":") && !strings.Contains(line, "：") {
-					sep = ":"
-				}
-				parts := strings.SplitN(line, sep, 2)
-				if len(parts) == 2 {
-					*dest = strings.TrimSpace(parts[1])
-				}
+		key, val, ok := splitLabelValue(line)
+		if !ok {
+			continue
+		}
+		// 续行：下一行不是新字段开头则拼接到当前值
+		for i+1 < len(lines) {
+			next := strings.TrimSpace(stripModelMarkdown(lines[i+1]))
+			if next == "" {
+				i++
+				continue
+			}
+			if isKnownFieldLine(next, knownKeys) {
 				break
 			}
+			val += " " + next
+			i++
+		}
+		val = strings.TrimSpace(val)
+		switch key {
+		case "分类号":
+			result.Classification = val
+		case "图书馆参考":
+			result.LibraryReference = val
+		case "最优分类路径":
+			result.ClassificationPath = val
+		case "完整类目层级":
+			result.CategoryLevels = splitCategoryLevels(val)
+		case "书籍作者":
+			result.Author = val
+		case "书籍国籍":
+			result.Nationality = val
 		}
 	}
 
+	applyParseFallback(content, result)
+	normalizeBookAnalysis(result)
+
+	if result.Classification == "" && result.ClassificationPath == "" && result.Author == "" {
+		return nil, fmt.Errorf("无法从模型响应中解析分类结果")
+	}
+	return result, nil
+}
+
+func stripModelMarkdown(s string) string {
+	s = strings.ReplaceAll(s, "**", "")
+	s = strings.ReplaceAll(s, "__", "")
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		if (s[0] == '`' && s[len(s)-1] == '`') || (s[0] == '"' && s[len(s)-1] == '"') {
+			s = strings.Trim(s, "`\"")
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+func splitLabelValue(line string) (key, val string, ok bool) {
+	line = stripModelMarkdown(line)
+	for _, sep := range []string{"：", ":"} {
+		if idx := strings.Index(line, sep); idx > 0 {
+			key = strings.TrimSpace(line[:idx])
+			val = strings.TrimSpace(line[idx+len(sep):])
+			key = strings.Trim(key, "*# ")
+			return key, val, true
+		}
+	}
+	return "", "", false
+}
+
+func isKnownFieldLine(line string, keys []string) bool {
+	for _, k := range keys {
+		if strings.HasPrefix(line, k+"：") || strings.HasPrefix(line, k+":") {
+			return true
+		}
+	}
+	return false
+}
+
+func applyParseFallback(content string, result *BookAnalysis) {
 	fallback := map[string]*string{
-		`分类号[：:]\s*([^\n]+)`:    &result.Classification,
-		`图书馆参考[：:]\s*([^\n]+)`:  &result.LibraryReference,
-		`最优分类路径[：:]\s*([^\n]+)`: &result.ClassificationPath,
-		`书籍作者[：:]\s*([^\n]+)`:   &result.Author,
-		`书籍国籍[：:]\s*([^\n]+)`:   &result.Nationality,
+		`分类号[：:\s]*([^\n]+)`:    &result.Classification,
+		`图书馆参考[：:\s]*([^\n]+)`:  &result.LibraryReference,
+		`最优分类路径[：:\s]*([^\n]+)`: &result.ClassificationPath,
+		`书籍作者[：:\s]*([^\n]+)`:   &result.Author,
+		`书籍国籍[：:\s]*([^\n]+)`:   &result.Nationality,
 	}
 	for pattern, dest := range fallback {
 		if *dest != "" {
@@ -186,24 +238,27 @@ func parseBookAnalysis(content string) (*BookAnalysis, error) {
 		}
 		re := regexp.MustCompile(pattern)
 		if m := re.FindStringSubmatch(content); len(m) > 1 {
-			*dest = strings.TrimSpace(m[1])
+			*dest = stripModelMarkdown(m[1])
 		}
 	}
 	if len(result.CategoryLevels) == 0 {
-		reLevels := regexp.MustCompile(`完整类目层级[：:]\s*([^\n]+)`)
+		reLevels := regexp.MustCompile(`完整类目层级[：:\s]*([^\n]+)`)
 		if m := reLevels.FindStringSubmatch(content); len(m) > 1 {
-			result.CategoryLevels = splitCategoryLevels(strings.TrimSpace(m[1]))
+			result.CategoryLevels = splitCategoryLevels(stripModelMarkdown(m[1]))
 		}
 	}
+}
 
-	if result.ClassificationPath == "" && len(result.CategoryLevels) > 0 {
-		result.ClassificationPath = strings.Join(result.CategoryLevels, " > ")
+func normalizeBookAnalysis(a *BookAnalysis) {
+	if a.ClassificationPath == "" && len(a.CategoryLevels) > 0 {
+		a.ClassificationPath = strings.Join(a.CategoryLevels, " > ")
 	}
-	if len(result.CategoryLevels) == 0 && result.ClassificationPath != "" {
-		result.CategoryLevels = splitCategoryLevels(strings.ReplaceAll(result.ClassificationPath, ">", "|"))
+	if len(a.CategoryLevels) == 0 && a.ClassificationPath != "" {
+		a.CategoryLevels = splitCategoryLevels(strings.ReplaceAll(a.ClassificationPath, ">", "|"))
 	}
-
-	return result, nil
+	if a.Classification == "" {
+		a.Classification = FinalCodeFromAnalysis(a)
+	}
 }
 
 func splitCategoryLevels(raw string) []string {

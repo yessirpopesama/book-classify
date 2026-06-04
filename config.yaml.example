@@ -1,2 +1,9 @@
 # DeepSeek API配置
 deepseek_api_key: your_api_key_here
+
+# 可选：图书馆分类员角色提示词文件路径（持久保存、可随时编辑，改动后无需重新编译）。
+# 不填则使用工作目录下的 classifier_role.txt；该文件首次运行会自动生成，可直接编辑。
+# classifier_prompt_file: classifier_role.txt
+
+# 可选：中图法扁平索引（类号校验），默认 data/clc/clc_index.json
+# clc_index_file: data/clc/clc_index.json

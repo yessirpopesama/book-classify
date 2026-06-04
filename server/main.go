@@ -43,7 +43,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
-	client = service.NewDeepSeekClient(config.DeepSeekAPIKey)
+	role := service.LoadClassifierRole(config.ClassifierPromptFile)
+	client = service.NewDeepSeekClient(config.DeepSeekAPIKey, role)
 
 	os.MkdirAll(uploadDir, 0755)
 	os.MkdirAll(resultsDir, 0755)
@@ -148,7 +149,7 @@ func handleClassify(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		os.MkdirAll(taskResultsDir, 0755)
-		err := service.ClassifyAndMove(taskDir, taskResultsDir, client)
+		err := service.ClassifyAndMove(taskDir, taskResultsDir, client, config.CLCIndexFile)
 		if rmErr := os.RemoveAll(taskDir); rmErr != nil {
 			log.Printf("清理上传临时目录失败 %s: %v", taskDir, rmErr)
 		}

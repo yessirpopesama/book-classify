@@ -10,6 +10,10 @@ import (
 // Config 配置结构
 type Config struct {
 	DeepSeekAPIKey string `yaml:"deepseek_api_key"`
+	// ClassifierPromptFile 可选：图书馆分类员角色提示词文件路径；为空时使用 DefaultClassifierRoleFile
+	ClassifierPromptFile string `yaml:"classifier_prompt_file"`
+	// CLCIndexFile 可选：中图法扁平索引路径；为空时使用 data/clc/clc_index.json
+	CLCIndexFile string `yaml:"clc_index_file"`
 }
 
 // LoadConfig 从config.yaml加载配置
