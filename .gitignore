@@ -34,7 +34,9 @@ Thumbs.db
 # Project specific
 source/
 results/
-data/
+# 运行时数据（上传/分类结果）；中图法索引 data/clc/ 需纳入版本库
+data/uploads/
+data/results/
 result.md
 result.txt
 *.log
