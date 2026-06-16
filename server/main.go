@@ -34,7 +34,27 @@ type TaskStatus struct {
 	ID        string    `json:"id"`
 	Status    string    `json:"status"` // pending, processing, completed, failed
 	Message   string    `json:"message"`
+	Total     int       `json:"total,omitempty"`
+	Current   int       `json:"current,omitempty"`
+	Progress  int       `json:"progress,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+func updateTaskProgress(taskID string, done, total int, fileName string) {
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	ts := taskStatus[taskID]
+	if ts == nil {
+		return
+	}
+	ts.Total = total
+	ts.Current = done
+	if total > 0 {
+		ts.Progress = done * 100 / total
+	}
+	if fileName != "" {
+		ts.Message = fmt.Sprintf("正在分类 (%d/%d): %s", done+1, total, fileName)
+	}
 }
 
 func main() {
@@ -93,16 +113,24 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uploaded := 0
 	for _, fh := range files {
-		ext := strings.ToLower(filepath.Ext(fh.Filename))
-		if ext != ".txt" && ext != ".pdf" && ext != ".epub" && ext != ".mobi" {
+		if !service.IsAllowedBookFile(fh.Filename) {
+			continue
+		}
+		rel := filepath.Clean(filepath.FromSlash(fh.Filename))
+		if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 			continue
 		}
 		f, err := fh.Open()
 		if err != nil {
 			continue
 		}
-		dst := filepath.Join(taskDir, fh.Filename)
+		dst := filepath.Join(taskDir, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			f.Close()
+			continue
+		}
 		out, err := os.Create(dst)
 		if err != nil {
 			f.Close()
@@ -111,13 +139,27 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		io.Copy(out, f)
 		f.Close()
 		out.Close()
+		uploaded++
+	}
+
+	if uploaded == 0 {
+		os.RemoveAll(taskDir)
+		jsonError(w, "未找到符合条件的图书文件（支持 .txt、.pdf、.epub、.mobi）", http.StatusBadRequest)
+		return
 	}
 
 	taskMu.Lock()
-	taskStatus[taskID] = &TaskStatus{ID: taskID, Status: "pending", Message: "上传完成", CreatedAt: time.Now()}
+	taskStatus[taskID] = &TaskStatus{
+		ID: taskID, Status: "pending", Message: "上传完成",
+		Total: uploaded, Current: 0, Progress: 0,
+		CreatedAt: time.Now(),
+	}
 	taskMu.Unlock()
 
-	json.NewEncoder(w).Encode(map[string]string{"task_id": taskID})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"task_id": taskID,
+		"count":   uploaded,
+	})
 }
 
 func handleClassify(w http.ResponseWriter, r *http.Request) {
@@ -144,23 +186,31 @@ func handleClassify(w http.ResponseWriter, r *http.Request) {
 
 	taskMu.Lock()
 	taskStatus[req.TaskID].Status = "processing"
-	taskStatus[req.TaskID].Message = "正在分类..."
+	taskStatus[req.TaskID].Message = "正在准备分类..."
+	taskStatus[req.TaskID].Progress = 0
 	taskMu.Unlock()
 
+	taskID := req.TaskID
 	go func() {
 		os.MkdirAll(taskResultsDir, 0755)
-		err := service.ClassifyAndMove(taskDir, taskResultsDir, client, config.CLCIndexFile)
+		err := service.ClassifyAndMove(taskDir, taskResultsDir, client, config.CLCIndexFile, func(done, total int, fileName string) {
+			updateTaskProgress(taskID, done, total, fileName)
+		})
 		if rmErr := os.RemoveAll(taskDir); rmErr != nil {
 			log.Printf("清理上传临时目录失败 %s: %v", taskDir, rmErr)
 		}
 		taskMu.Lock()
 		defer taskMu.Unlock()
 		if err != nil {
-			taskStatus[req.TaskID].Status = "failed"
-			taskStatus[req.TaskID].Message = err.Error()
+			taskStatus[taskID].Status = "failed"
+			taskStatus[taskID].Message = err.Error()
 		} else {
-			taskStatus[req.TaskID].Status = "completed"
-			taskStatus[req.TaskID].Message = "分类完成"
+			taskStatus[taskID].Status = "completed"
+			taskStatus[taskID].Message = "分类完成"
+			taskStatus[taskID].Progress = 100
+			if taskStatus[taskID].Total > 0 {
+				taskStatus[taskID].Current = taskStatus[taskID].Total
+			}
 		}
 	}()
 

@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+// IsAllowedBookFile 是否为支持分类的图书格式
+func IsAllowedBookFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".txt" || ext == ".pdf" || ext == ".epub" || ext == ".mobi"
+}
+
 // GeneratePrompt 从source文件夹读取所有文件名，生成prompts提示器字符串
 // 返回: prompts字符串, 文件相对路径列表, 错误
 func GeneratePrompt(sourceDir string) (string, []string, error) {
@@ -43,8 +49,8 @@ func GeneratePrompt(sourceDir string) (string, []string, error) {
 		// 只收集文件，跳过目录
 		if !info.IsDir() {
 			fileName := info.Name()
-			// 排除指定文件
-			if !excludedFiles[fileName] {
+			// 排除指定文件，仅保留支持的图书格式
+			if !excludedFiles[fileName] && IsAllowedBookFile(fileName) {
 				// 计算相对于sourceDir的相对路径
 				relPath, err := filepath.Rel(absSourceDir, path)
 				if err != nil {
@@ -106,8 +112,8 @@ func GenerateCatalog(sourceDir, outputFile string) error {
 		// 只收集文件，跳过目录
 		if !info.IsDir() {
 			fileName := info.Name()
-			// 排除指定文件
-			if !excludedFiles[fileName] {
+			// 排除指定文件，仅保留支持的图书格式
+			if !excludedFiles[fileName] && IsAllowedBookFile(fileName) {
 				allFileNames = append(allFileNames, fileName)
 			}
 		}

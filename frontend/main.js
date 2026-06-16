@@ -1,6 +1,8 @@
 const API_BASE = '/api'
 const uploadZone = document.getElementById('uploadZone')
 const fileInput = document.getElementById('fileInput')
+const folderInput = document.getElementById('folderInput')
+const folderLink = document.getElementById('folderLink')
 const fileList = document.getElementById('fileList')
 const clearBtn = document.getElementById('clearBtn')
 const uploadBtn = document.getElementById('uploadBtn')
@@ -12,9 +14,28 @@ const downloadBtn = document.getElementById('downloadBtn')
 const loadingOverlay = document.getElementById('loadingOverlay')
 const loadingTitle = document.getElementById('loadingTitle')
 const loadingSub = document.getElementById('loadingSub')
+const loadingProgressBar = document.getElementById('loadingProgressBar')
+const loadingProgressText = document.getElementById('loadingProgressText')
 
 let selectedFiles = []
 const ALLOWED_EXT = ['.txt', '.pdf', '.epub', '.mobi']
+
+function setProgress(percent, options = {}) {
+  const { indeterminate = false, label } = options
+  if (!loadingProgressBar || !loadingProgressText) return
+
+  if (indeterminate) {
+    loadingProgressBar.classList.add('indeterminate')
+    loadingProgressBar.style.width = ''
+    loadingProgressText.textContent = label || '上传中…'
+    return
+  }
+
+  loadingProgressBar.classList.remove('indeterminate')
+  const p = Math.min(100, Math.max(0, Math.round(percent)))
+  loadingProgressBar.style.width = p + '%'
+  loadingProgressText.textContent = label || (p + '%')
+}
 
 function setLoading(show, title, sub) {
   if (show) {
@@ -25,45 +46,138 @@ function setLoading(show, title, sub) {
   } else {
     loadingOverlay.classList.remove('show')
     loadingOverlay.setAttribute('aria-hidden', 'true')
+    setProgress(0)
   }
 }
 
-function setOverlayText(title, sub) {
+function setOverlayText(title, sub, progress) {
   loadingTitle.textContent = title
   loadingSub.textContent = sub
+  if (progress) {
+    if (progress.indeterminate) {
+      setProgress(0, { indeterminate: true, label: progress.label })
+    } else if (typeof progress.percent === 'number') {
+      setProgress(progress.percent, { label: progress.label })
+    }
+  }
 }
 
-uploadZone.addEventListener('click', () => fileInput.click())
+function fileKey(f) {
+  return (f.webkitRelativePath || f.name) + '\0' + f.size
+}
+
+function isAllowedFile(f) {
+  const name = f.webkitRelativePath || f.name
+  const ext = '.' + name.split('.').pop().toLowerCase()
+  return ALLOWED_EXT.includes(ext)
+}
+
+function displayPath(f) {
+  const rel = f.webkitRelativePath || f.name
+  const idx = rel.lastIndexOf('/')
+  if (idx === -1) return { dir: '', name: rel }
+  return { dir: rel.slice(0, idx + 1), name: rel.slice(idx + 1) }
+}
+
+function addFiles(files) {
+  const existing = new Set(selectedFiles.map(fileKey))
+  for (const f of files) {
+    if (!isAllowedFile(f)) continue
+    const key = fileKey(f)
+    if (existing.has(key)) continue
+    existing.add(key)
+    selectedFiles.push(f)
+  }
+  renderFileList()
+}
+
+uploadZone.addEventListener('click', (e) => {
+  if (e.target.closest('#folderLink')) return
+  fileInput.click()
+})
+
+folderLink.addEventListener('click', (e) => {
+  e.preventDefault()
+  e.stopPropagation()
+  folderInput.click()
+})
+
 uploadZone.addEventListener('dragover', (e) => {
   e.preventDefault()
   uploadZone.classList.add('dragover')
 })
 uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'))
-uploadZone.addEventListener('drop', (e) => {
+uploadZone.addEventListener('drop', async (e) => {
   e.preventDefault()
   uploadZone.classList.remove('dragover')
+  const items = e.dataTransfer?.items
+  if (items && items.length > 0) {
+    const collected = await collectDroppedFiles(items)
+    if (collected.length > 0) {
+      addFiles(collected)
+      return
+    }
+  }
   addFiles(e.dataTransfer.files)
 })
 
-fileInput.addEventListener('change', (e) => addFiles(e.target.files))
+fileInput.addEventListener('change', (e) => {
+  addFiles(e.target.files)
+  e.target.value = ''
+})
 
-function addFiles(files) {
-  for (const f of files) {
-    const ext = '.' + f.name.split('.').pop().toLowerCase()
-    if (ALLOWED_EXT.includes(ext) && !selectedFiles.find(x => x.name === f.name && x.size === f.size)) {
-      selectedFiles.push(f)
+folderInput.addEventListener('change', (e) => {
+  addFiles(e.target.files)
+  e.target.value = ''
+})
+
+async function collectDroppedFiles(items) {
+  const files = []
+  const tasks = []
+  for (const item of items) {
+    const entry = item.webkitGetAsEntry?.()
+    if (entry) {
+      tasks.push(walkEntry(entry, ''))
     }
   }
-  renderFileList()
+  const nested = await Promise.all(tasks)
+  for (const batch of nested) files.push(...batch)
+  return files
+}
+
+async function walkEntry(entry, prefix) {
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
+    file.webkitRelativePath = prefix + entry.name
+    return [file]
+  }
+  if (!entry.isDirectory) return []
+
+  const reader = entry.createReader()
+  const children = []
+  const readBatch = () => new Promise((resolve, reject) => reader.readEntries(resolve, reject))
+
+  while (true) {
+    const batch = await readBatch()
+    if (!batch.length) break
+    children.push(...batch)
+  }
+
+  const nested = await Promise.all(
+    children.map(child => walkEntry(child, prefix + entry.name + '/'))
+  )
+  return nested.flat()
 }
 
 function renderFileList() {
-  fileList.innerHTML = selectedFiles.map((f, i) => `
+  fileList.innerHTML = selectedFiles.map((f, i) => {
+    const { dir, name } = displayPath(f)
+    return `
     <div class="item">
-      <span class="name">${f.name}</span>
+      <span class="path" title="${esc(dir + name)}">${dir ? `<span class="dir">${esc(dir)}</span>` : ''}${esc(name)}</span>
       <span class="remove" data-i="${i}">删除</span>
-    </div>
-  `).join('')
+    </div>`
+  }).join('')
   fileList.querySelectorAll('.remove').forEach(el => {
     el.addEventListener('click', () => {
       selectedFiles.splice(+el.dataset.i, 1)
@@ -92,9 +206,13 @@ uploadBtn.addEventListener('click', async () => {
   downloadBtn.style.display = 'none'
 
   setLoading(true, '正在上传', `共 ${selectedFiles.length} 个文件`)
+  setProgress(0, { indeterminate: true, label: '上传中…' })
 
   const formData = new FormData()
-  selectedFiles.forEach(f => formData.append('files', f))
+  selectedFiles.forEach(f => {
+    const uploadName = f.webkitRelativePath || f.name
+    formData.append('files', f, uploadName)
+  })
 
   try {
     const res = await fetch(API_BASE + '/upload', {
@@ -102,10 +220,14 @@ uploadBtn.addEventListener('click', async () => {
       body: formData
     })
     const data = await res.json()
-    if (data.error) throw new Error(data.error)
+    if (!res.ok || data.error) throw new Error(data.error || '上传失败')
     const taskId = data.task_id
+    const total = data.count || selectedFiles.length
 
-    setOverlayText('正在智能分类', '分析正文并生成中图法分类号，请稍候…')
+    setOverlayText('正在智能分类', '分析正文并生成中图法分类号，请稍候…', {
+      percent: 0,
+      label: total > 0 ? `0 / ${total}` : '0%'
+    })
 
     const classifyRes = await fetch(API_BASE + '/classify', {
       method: 'POST',
@@ -121,8 +243,13 @@ uploadBtn.addEventListener('click', async () => {
       const poll = async () => {
         try {
           const s = await fetch(API_BASE + '/status/' + taskId).then(r => r.json())
-          setOverlayText('正在智能分类', s.message || '处理中…')
+          const totalFiles = s.total || total
+          const done = s.current || 0
+          const pct = typeof s.progress === 'number' ? s.progress : (totalFiles > 0 ? Math.round(done * 100 / totalFiles) : 0)
+          const progressLabel = totalFiles > 0 ? `${done} / ${totalFiles}` : (pct + '%')
+          setOverlayText('正在智能分类', s.message || '处理中…', { percent: pct, label: progressLabel })
           if (s.status === 'completed') {
+            setProgress(100, { label: totalFiles > 0 ? `${totalFiles} / ${totalFiles}` : '100%' })
             resolve(s)
             return
           }

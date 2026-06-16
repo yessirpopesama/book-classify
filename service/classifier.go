@@ -16,9 +16,16 @@ type analysisResultItem struct {
 	officialPath  string // 索引中的标准路径（供人工参考）
 }
 
+// ClassifyProgressFunc 分类进度回调：done 为已完成数量，total 为总文件数，fileName 为当前处理的文件名
+type ClassifyProgressFunc func(done, total int, fileName string)
+
 // ClassifyAndMove 分类并移动文件
 // 读取每本书正文第一页（约1000字），分析作者、国籍、分类号及类目层级，输出分类号、书籍作者、书籍国籍
-func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient, clcIndexFile string) error {
+func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient, clcIndexFile string, onProgress ...ClassifyProgressFunc) error {
+	var progress ClassifyProgressFunc
+	if len(onProgress) > 0 {
+		progress = onProgress[0]
+	}
 	// 生成prompts（获取文件列表）
 	_, filePaths, err := GeneratePrompt(sourceDir)
 	if err != nil {
@@ -50,8 +57,11 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient, clcIn
 	pendingCount := 0
 	failCount := 0
 
-	for _, relPath := range filePaths {
+	for i, relPath := range filePaths {
 		fileName := filepath.Base(relPath)
+		if progress != nil {
+			progress(i, len(filePaths), fileName)
+		}
 		fullPath := filepath.Join(sourceDir, relPath)
 		fmt.Printf("\n处理文件: %s\n", fullPath)
 

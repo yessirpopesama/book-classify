@@ -77,6 +77,28 @@
       font-size: 13px;
       color: var(--text-secondary);
     }
+    .upload-zone .folder-link {
+      display: inline-block;
+      margin-top: 10px;
+      font-size: 14px;
+      color: var(--wx-green);
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .upload-zone .folder-link:hover {
+      text-decoration: underline;
+    }
+    .file-list .item .path {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .file-list .item .path .dir {
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
     input[type="file"] { display: none; }
     .file-list {
       background: var(--card-bg);
@@ -174,7 +196,7 @@
       padding: 36px 48px;
       text-align: center;
       box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
-      min-width: 260px;
+      min-width: 300px;
     }
     .loading-spinner {
       width: 44px;
@@ -196,6 +218,42 @@
     }
     .loading-sub {
       font-size: 14px;
+      color: var(--text-secondary);
+    }
+    .loading-progress {
+      margin-top: 20px;
+      width: 100%;
+      min-width: 240px;
+    }
+    .loading-progress-track {
+      height: 6px;
+      background: #ECECF0;
+      border-radius: 3px;
+      overflow: hidden;
+      position: relative;
+    }
+    .loading-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--wx-green);
+      border-radius: 3px;
+      transition: width 0.35s ease;
+    }
+    .loading-progress-bar.indeterminate {
+      width: 35%;
+      position: absolute;
+      left: 0;
+      top: 0;
+      transition: none;
+      animation: loading-slide 1.1s ease-in-out infinite;
+    }
+    @keyframes loading-slide {
+      0% { left: -35%; }
+      100% { left: 100%; }
+    }
+    .loading-progress-text {
+      margin-top: 8px;
+      font-size: 12px;
       color: var(--text-secondary);
     }
     .result-panel {
@@ -338,6 +396,12 @@
       <div class="loading-spinner"></div>
       <div class="loading-title" id="loadingTitle">正在处理</div>
       <div class="loading-sub" id="loadingSub">请稍候…</div>
+      <div class="loading-progress">
+        <div class="loading-progress-track">
+          <div class="loading-progress-bar" id="loadingProgressBar"></div>
+        </div>
+        <div class="loading-progress-text" id="loadingProgressText">0%</div>
+      </div>
     </div>
   </div>
   <div class="container">
@@ -347,9 +411,11 @@
     </header>
     <div class="upload-zone" id="uploadZone">
       <div class="icon">📚</div>
-      <div class="hint">点击或拖拽书籍到此处</div>
-      <div class="sub">支持 .txt、.pdf、.epub、.mobi 格式</div>
+      <div class="hint">点击或拖拽书籍、文件夹到此处</div>
+      <div class="sub">自动扫描子目录，仅收录 .txt、.pdf、.epub、.mobi</div>
+      <a href="#" class="folder-link" id="folderLink">选择文件夹</a>
       <input type="file" id="fileInput" multiple accept=".txt,.pdf,.epub,.mobi">
+      <input type="file" id="folderInput" webkitdirectory directory multiple>
     </div>
     <div class="file-list" id="fileList"></div>
     <div class="actions">
