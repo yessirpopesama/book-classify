@@ -1,8 +1,64 @@
 const API_BASE = '/api'
+
+const TOOLS = {
+  classify: {
+    id: 'classify',
+    title: '图书分类',
+    subtitle: '上传书籍，智能分类，一键下载',
+    icon: '📚',
+    uploadHint: '点击或拖拽书籍、文件夹到此处',
+    uploadSub: '自动扫描子目录，仅收录 .txt、.pdf、.epub、.mobi',
+    accept: '.txt,.pdf,.epub,.mobi',
+    allowFolder: true,
+    actionText: '开始上传并分类',
+    loadingProcess: '正在智能分类',
+    loadingSub: '分析正文并生成中图法分类号，请稍候…',
+    uploadUrl: '/upload',
+    startUrl: '/classify',
+    resultsUrl: (id) => `/results/${id}`,
+    downloadName: 'results.zip',
+    downloadText: '下载分类结果',
+    successTitle: '分类完成',
+    successMsg: '所有文件已归类到对应分类目录中。',
+    renderResults: renderClassifyResults,
+    isAllowed: (name) => {
+      const ext = '.' + name.split('.').pop().toLowerCase()
+      return ['.txt', '.pdf', '.epub', '.mobi'].includes(ext)
+    }
+  },
+  repair: {
+    id: 'repair',
+    title: '内容修复',
+    subtitle: '优化书名、修复编码与格式、对齐正文并剔除垃圾内容',
+    icon: '🔧',
+    uploadHint: '点击或拖拽 txt 文件到此处',
+    uploadSub: '仅支持 .txt，自动修复 Win/Mac 无法读取的编码与格式问题',
+    accept: '.txt',
+    allowFolder: true,
+    actionText: '开始上传并修复',
+    loadingProcess: '正在修复内容',
+    loadingSub: '优化文件名、转换编码、对齐正文并剔除广告行…',
+    uploadUrl: '/repair/upload',
+    startUrl: '/repair',
+    resultsUrl: (id) => `/repair/results/${id}`,
+    downloadName: 'repaired.zip',
+    downloadText: '下载修复结果',
+    successTitle: '修复完成',
+    successMsg: '所有 txt 已修复，可下载查看修复报告。',
+    renderResults: renderRepairResults,
+    isAllowed: (name) => name.toLowerCase().endsWith('.txt')
+  }
+}
+
+let currentTool = 'classify'
+let selectedFiles = []
+
 const uploadZone = document.getElementById('uploadZone')
 const fileInput = document.getElementById('fileInput')
 const folderInput = document.getElementById('folderInput')
 const folderLink = document.getElementById('folderLink')
+const fileListWrap = document.getElementById('fileListWrap')
+const fileCountEl = document.getElementById('fileCount')
 const fileList = document.getElementById('fileList')
 const clearBtn = document.getElementById('clearBtn')
 const uploadBtn = document.getElementById('uploadBtn')
@@ -16,9 +72,30 @@ const loadingTitle = document.getElementById('loadingTitle')
 const loadingSub = document.getElementById('loadingSub')
 const loadingProgressBar = document.getElementById('loadingProgressBar')
 const loadingProgressText = document.getElementById('loadingProgressText')
+const toolTabs = document.getElementById('toolTabs')
+const pageTitle = document.getElementById('pageTitle')
+const pageSubtitle = document.getElementById('pageSubtitle')
+const uploadHint = document.getElementById('uploadHint')
+const uploadSub = document.getElementById('uploadSub')
+const uploadIcon = document.getElementById('uploadIcon')
 
-let selectedFiles = []
-const ALLOWED_EXT = ['.txt', '.pdf', '.epub', '.mobi']
+function tool() {
+  return TOOLS[currentTool]
+}
+
+async function parseJsonResponse(res) {
+  const text = await res.text()
+  if (!text) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    if (res.status === 404 && text.includes('page not found')) {
+      throw new Error('后端接口不存在，请重启服务：./start.sh')
+    }
+    const brief = text.length > 120 ? text.slice(0, 120) + '…' : text
+    throw new Error(brief || `请求失败 (HTTP ${res.status})`)
+  }
+}
 
 function setProgress(percent, options = {}) {
   const { indeterminate = false, label } = options
@@ -66,12 +143,6 @@ function fileKey(f) {
   return (f.webkitRelativePath || f.name) + '\0' + f.size
 }
 
-function isAllowedFile(f) {
-  const name = f.webkitRelativePath || f.name
-  const ext = '.' + name.split('.').pop().toLowerCase()
-  return ALLOWED_EXT.includes(ext)
-}
-
 function displayPath(f) {
   const rel = f.webkitRelativePath || f.name
   const idx = rel.lastIndexOf('/')
@@ -80,9 +151,11 @@ function displayPath(f) {
 }
 
 function addFiles(files) {
+  const cfg = tool()
   const existing = new Set(selectedFiles.map(fileKey))
   for (const f of files) {
-    if (!isAllowedFile(f)) continue
+    const name = f.webkitRelativePath || f.name
+    if (!cfg.isAllowed(name)) continue
     const key = fileKey(f)
     if (existing.has(key)) continue
     existing.add(key)
@@ -90,6 +163,90 @@ function addFiles(files) {
   }
   renderFileList()
 }
+
+function switchTool(next) {
+  if (next === currentTool) return
+  currentTool = next
+  selectedFiles = []
+  renderToolUI()
+  renderFileList()
+  statusCard.classList.remove('show')
+  resultPanel.style.display = 'none'
+  resultPanel.innerHTML = ''
+  downloadBtn.style.display = 'none'
+  hidePathTooltip()
+}
+
+function renderToolUI() {
+  const cfg = tool()
+  document.title = `${cfg.title} - 图书工具`
+  pageTitle.textContent = cfg.title
+  pageSubtitle.textContent = cfg.subtitle
+  uploadIcon.textContent = cfg.icon
+  uploadHint.textContent = cfg.uploadHint
+  uploadSub.textContent = cfg.uploadSub
+  uploadBtn.textContent = cfg.actionText
+  fileInput.accept = cfg.accept
+  folderLink.style.display = cfg.allowFolder ? 'inline-block' : 'none'
+  folderInput.style.display = cfg.allowFolder ? '' : 'none'
+
+  toolTabs.querySelectorAll('.tool-tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.tool === currentTool)
+  })
+}
+
+function fileExt(name) {
+  const parts = name.split('.')
+  return parts.length > 1 ? parts.pop().toLowerCase() : 'other'
+}
+
+function fileTypeClass(name) {
+  const ext = fileExt(name)
+  return ['txt', 'pdf', 'epub', 'mobi'].includes(ext) ? ext : 'other'
+}
+
+function fileTypeLabel(name) {
+  const ext = fileExt(name)
+  return ext === 'other' ? 'FILE' : ext.toUpperCase()
+}
+
+function renderFileList() {
+  const count = selectedFiles.length
+  if (fileCountEl) fileCountEl.textContent = count
+  if (fileListWrap) fileListWrap.classList.toggle('has-files', count > 0)
+
+  if (count === 0) {
+    fileList.innerHTML = ''
+    uploadBtn.disabled = true
+    return
+  }
+
+  fileList.innerHTML = selectedFiles.map((f, i) => {
+    const { dir, name } = displayPath(f)
+    const typeClass = fileTypeClass(name)
+    const fullPath = dir + name
+    return `
+    <div class="file-card" title="${esc(fullPath)}">
+      <button type="button" class="file-card-remove" data-i="${i}" aria-label="删除">×</button>
+      <div class="file-card-icon ${typeClass}">${fileTypeLabel(name)}</div>
+      <div class="file-card-name">${esc(name)}</div>
+      ${dir ? `<div class="file-card-dir">${esc(dir)}</div>` : ''}
+    </div>`
+  }).join('')
+
+  fileList.querySelectorAll('.file-card-remove').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation()
+      selectedFiles.splice(+el.dataset.i, 1)
+      renderFileList()
+    })
+  })
+  uploadBtn.disabled = false
+}
+
+toolTabs.querySelectorAll('.tool-tab').forEach(tab => {
+  tab.addEventListener('click', () => switchTool(tab.dataset.tool))
+})
 
 uploadZone.addEventListener('click', (e) => {
   if (e.target.closest('#folderLink')) return
@@ -136,9 +293,7 @@ async function collectDroppedFiles(items) {
   const tasks = []
   for (const item of items) {
     const entry = item.webkitGetAsEntry?.()
-    if (entry) {
-      tasks.push(walkEntry(entry, ''))
-    }
+    if (entry) tasks.push(walkEntry(entry, ''))
   }
   const nested = await Promise.all(tasks)
   for (const batch of nested) files.push(...batch)
@@ -169,35 +324,36 @@ async function walkEntry(entry, prefix) {
   return nested.flat()
 }
 
-function renderFileList() {
-  fileList.innerHTML = selectedFiles.map((f, i) => {
-    const { dir, name } = displayPath(f)
-    return `
-    <div class="item">
-      <span class="path" title="${esc(dir + name)}">${dir ? `<span class="dir">${esc(dir)}</span>` : ''}${esc(name)}</span>
-      <span class="remove" data-i="${i}">删除</span>
-    </div>`
-  }).join('')
-  fileList.querySelectorAll('.remove').forEach(el => {
-    el.addEventListener('click', () => {
-      selectedFiles.splice(+el.dataset.i, 1)
-      renderFileList()
-    })
-  })
-  uploadBtn.disabled = selectedFiles.length === 0
-}
+clearBtn.addEventListener('click', async () => {
+  if (!confirm('确定清空列表并删除本地 data 下的任务数据吗？\n（不会删除中图法索引 data/clc）')) {
+    return
+  }
 
-clearBtn.addEventListener('click', () => {
-  selectedFiles = []
-  renderFileList()
-  statusCard.classList.remove('show')
-  resultPanel.style.display = 'none'
-  resultPanel.innerHTML = ''
-  hidePathTooltip()
+  clearBtn.disabled = true
+  try {
+    const res = await fetch(API_BASE + '/clear', { method: 'POST' })
+    const data = await parseJsonResponse(res)
+    if (!res.ok || data.error) {
+      throw new Error(data.error || '清空失败')
+    }
+
+    selectedFiles = []
+    renderFileList()
+    statusCard.classList.remove('show')
+    resultPanel.style.display = 'none'
+    resultPanel.innerHTML = ''
+    downloadBtn.style.display = 'none'
+    hidePathTooltip()
+  } catch (err) {
+    showResultError(err.message || String(err))
+  } finally {
+    clearBtn.disabled = false
+  }
 })
 
 uploadBtn.addEventListener('click', async () => {
   if (selectedFiles.length === 0) return
+  const cfg = tool()
   uploadBtn.disabled = true
   statusCard.classList.remove('show')
   resultPanel.style.display = 'none'
@@ -215,58 +371,33 @@ uploadBtn.addEventListener('click', async () => {
   })
 
   try {
-    const res = await fetch(API_BASE + '/upload', {
+    const res = await fetch(API_BASE + cfg.uploadUrl, {
       method: 'POST',
       body: formData
     })
-    const data = await res.json()
+    const data = await parseJsonResponse(res)
     if (!res.ok || data.error) throw new Error(data.error || '上传失败')
     const taskId = data.task_id
     const total = data.count || selectedFiles.length
 
-    setOverlayText('正在智能分类', '分析正文并生成中图法分类号，请稍候…', {
+    setOverlayText(cfg.loadingProcess, cfg.loadingSub, {
       percent: 0,
       label: total > 0 ? `0 / ${total}` : '0%'
     })
 
-    const classifyRes = await fetch(API_BASE + '/classify', {
+    const startRes = await fetch(API_BASE + cfg.startUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ task_id: taskId })
     })
-    if (!classifyRes.ok) {
-      const errBody = await classifyRes.json().catch(() => ({}))
-      throw new Error(errBody.error || '启动分类失败')
+    if (!startRes.ok) {
+      const errBody = await parseJsonResponse(startRes).catch(e => ({ error: e.message }))
+      throw new Error(errBody.error || '启动处理失败')
     }
 
-    const finalStatus = await new Promise((resolve, reject) => {
-      const poll = async () => {
-        try {
-          const s = await fetch(API_BASE + '/status/' + taskId).then(r => r.json())
-          const totalFiles = s.total || total
-          const done = s.current || 0
-          const pct = typeof s.progress === 'number' ? s.progress : (totalFiles > 0 ? Math.round(done * 100 / totalFiles) : 0)
-          const progressLabel = totalFiles > 0 ? `${done} / ${totalFiles}` : (pct + '%')
-          setOverlayText('正在智能分类', s.message || '处理中…', { percent: pct, label: progressLabel })
-          if (s.status === 'completed') {
-            setProgress(100, { label: totalFiles > 0 ? `${totalFiles} / ${totalFiles}` : '100%' })
-            resolve(s)
-            return
-          }
-          if (s.status === 'failed') {
-            reject(new Error(s.message || '分类失败'))
-            return
-          }
-          setTimeout(poll, 1200)
-        } catch (e) {
-          reject(e)
-        }
-      }
-      poll()
-    })
-
+    const finalStatus = await pollStatus(taskId, total, cfg)
     setLoading(false)
-    showResultSuccess(taskId, finalStatus)
+    showResultSuccess(taskId, finalStatus, cfg)
   } catch (err) {
     setLoading(false)
     showResultError(err.message || String(err))
@@ -275,82 +406,171 @@ uploadBtn.addEventListener('click', async () => {
   }
 })
 
-async function showResultSuccess(taskId, statusObj) {
+async function pollStatus(taskId, total, cfg) {
+  return new Promise((resolve, reject) => {
+    const poll = async () => {
+      try {
+        const statusRes = await fetch(API_BASE + '/status/' + taskId)
+        const s = await parseJsonResponse(statusRes)
+        const totalFiles = s.total || total
+        const done = s.current || 0
+        const pct = typeof s.progress === 'number' ? s.progress : (totalFiles > 0 ? Math.round(done * 100 / totalFiles) : 0)
+        const progressLabel = totalFiles > 0 ? `${done} / ${totalFiles}` : (pct + '%')
+        setOverlayText(cfg.loadingProcess, s.message || '处理中…', { percent: pct, label: progressLabel })
+        if (s.status === 'completed') {
+          setProgress(100, { label: totalFiles > 0 ? `${totalFiles} / ${totalFiles}` : '100%' })
+          resolve(s)
+          return
+        }
+        if (s.status === 'failed') {
+          reject(new Error(s.message || '处理失败'))
+          return
+        }
+        setTimeout(poll, 1200)
+      } catch (e) {
+        reject(e)
+      }
+    }
+    poll()
+  })
+}
+
+async function showResultSuccess(taskId, statusObj, cfg) {
   statusCard.classList.add('show')
-  statusText.textContent = '分类完成'
+  statusText.textContent = cfg.successTitle
   statusText.className = 'status completed'
-  statusMsg.textContent = statusObj.message || '所有文件已归类到对应分类目录中。'
+  statusMsg.textContent = statusObj.message || cfg.successMsg
 
   downloadBtn.href = API_BASE + '/download/' + taskId
+  downloadBtn.download = cfg.downloadName
+  downloadBtn.textContent = cfg.downloadText
   downloadBtn.style.display = 'inline-block'
 
   try {
-    const res = await fetch(API_BASE + '/results/' + taskId)
-    const rows = await res.json()
-    if (!Array.isArray(rows) || rows.length === 0) {
-      resultPanel.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">暂无分类数据</div>'
-      resultPanel.style.display = 'block'
-      return
-    }
-
-    const successRows = rows.filter(r => !r.error)
-    const errorRows = rows.filter(r => r.error)
-
-    let html = `
-      <div class="result-summary">
-        <div class="stat">总计 <span class="num">${rows.length}</span> 本</div>
-        <div class="stat">成功 <span class="num">${successRows.length}</span></div>
-        <div class="stat">未识别 <span class="num">${errorRows.length}</span></div>
-      </div>
-      <div class="result-table-wrap">
-        <table class="result-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>书名</th>
-              <th>分类号</th>
-              <th>最优分类路径</th>
-              <th>书籍作者</th>
-              <th>书籍国籍</th>
-            </tr>
-          </thead>
-          <tbody>`
-
-    rows.forEach((r, i) => {
-      if (r.error) {
-        html += `
-            <tr>
-              <td>${i + 1}</td>
-              <td title="${esc(r.book_name)}">${esc(r.book_name)}</td>
-              <td class="err-cell" colspan="4">${esc(r.error)}</td>
-            </tr>`
-      } else {
-        html += `
-            <tr>
-              <td>${i + 1}</td>
-              <td title="${esc(r.book_name)}">${esc(r.book_name)}</td>
-              <td class="cls-cell">${esc(r.classification)}</td>
-              <td class="path-cell" data-path-idx="${i}">
-                <span class="path-text">${esc(r.classification_path)}</span>
-              </td>
-              <td>${esc(r.author)}</td>
-              <td>${esc(r.nationality)}</td>
-            </tr>`
-      }
-    })
-
-    html += `
-          </tbody>
-        </table>
-      </div>`
-
-    resultPanel.innerHTML = html
-    resultPanel.style.display = 'block'
-    bindPathTooltips(rows)
+    const res = await fetch(API_BASE + cfg.resultsUrl(taskId))
+    const rows = await parseJsonResponse(res)
+    cfg.renderResults(rows)
   } catch (e) {
     resultPanel.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">结果加载失败</div>'
     resultPanel.style.display = 'block'
   }
+}
+
+async function renderClassifyResults(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    resultPanel.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">暂无分类数据</div>'
+    resultPanel.style.display = 'block'
+    return
+  }
+
+  const successRows = rows.filter(r => !r.error)
+  const errorRows = rows.filter(r => r.error)
+
+  let html = `
+    <div class="result-summary">
+      <div class="stat">总计 <span class="num">${rows.length}</span> 本</div>
+      <div class="stat">成功 <span class="num">${successRows.length}</span></div>
+      <div class="stat">未识别 <span class="num">${errorRows.length}</span></div>
+    </div>
+    <div class="result-table-wrap">
+      <table class="result-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>书名</th>
+            <th>分类号</th>
+            <th>最优分类路径</th>
+            <th>书籍作者</th>
+            <th>书籍国籍</th>
+          </tr>
+        </thead>
+        <tbody>`
+
+  rows.forEach((r, i) => {
+    if (r.error) {
+      html += `
+          <tr>
+            <td>${i + 1}</td>
+            <td title="${esc(r.book_name)}">${esc(r.book_name)}</td>
+            <td class="err-cell" colspan="4">${esc(r.error)}</td>
+          </tr>`
+    } else {
+      html += `
+          <tr>
+            <td>${i + 1}</td>
+            <td title="${esc(r.book_name)}">${esc(r.book_name)}</td>
+            <td class="cls-cell">${esc(r.classification)}</td>
+            <td class="path-cell" data-path-idx="${i}">
+              <span class="path-text">${esc(r.classification_path)}</span>
+            </td>
+            <td>${esc(r.author)}</td>
+            <td>${esc(r.nationality)}</td>
+          </tr>`
+    }
+  })
+
+  html += `
+        </tbody>
+      </table>
+    </div>`
+
+  resultPanel.innerHTML = html
+  resultPanel.style.display = 'block'
+  bindPathTooltips(rows)
+}
+
+async function renderRepairResults(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    resultPanel.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0;">暂无修复数据</div>'
+    resultPanel.style.display = 'block'
+    return
+  }
+
+  const successRows = rows.filter(r => !r.error)
+  const errorRows = rows.filter(r => r.error)
+
+  let html = `
+    <div class="result-summary">
+      <div class="stat">总计 <span class="num">${rows.length}</span> 本</div>
+      <div class="stat">成功 <span class="num">${successRows.length}</span></div>
+      <div class="stat">失败 <span class="num">${errorRows.length}</span></div>
+    </div>`
+
+  rows.forEach((r, i) => {
+    const opts = (r.optimizations || []).map(o => `<li>${esc(o)}</li>`).join('')
+    const fname = (r.filename_changes || []).map(o => `<li>${esc(o)}</li>`).join('')
+    const totalRemoved = r.removed_lines ?? 0
+    html += `
+    <div class="repair-detail-card" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:12px;">
+      <div style="font-weight:600;margin-bottom:8px;">${i + 1}. ${esc(r.original_name)}</div>
+      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">
+        ${r.error
+          ? `<span class="err-cell">${esc(r.error)}</span>`
+          : `新文件：<span style="color:var(--text)">${esc(r.new_name)}</span>`}
+      </div>
+      ${!r.error ? `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;font-size:12px;margin-bottom:12px;">
+        <div>编码：${esc(r.encoding)} → ${esc(r.output_encoding || 'utf-8')}</div>
+        <div>字数：${r.original_runes ?? '-'} → ${r.final_runes ?? '-'}</div>
+        <div>行数：${r.original_lines ?? '-'} → ${r.final_lines ?? '-'}</div>
+        <div>大小：${formatBytes(r.original_bytes)} → ${formatBytes(r.final_bytes)}</div>
+        <div>剔除：${totalRemoved} 行</div>
+      </div>
+      ${fname ? `<div style="font-size:12px;margin-bottom:8px;"><strong>文件名优化</strong><ul style="margin:6px 0 0 18px;color:var(--text-secondary);">${fname}</ul></div>` : ''}
+      ${opts ? `<div style="font-size:12px;"><strong>优化项</strong><ul style="margin:6px 0 0 18px;color:var(--text-secondary);">${opts}</ul></div>` : ''}
+      ` : ''}
+    </div>`
+  })
+
+  resultPanel.innerHTML = html
+  resultPanel.style.display = 'block'
+}
+
+function formatBytes(n) {
+  if (n == null || n === undefined) return '-'
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / (1024 * 1024)).toFixed(2) + ' MB'
 }
 
 function esc(str) {
@@ -468,3 +688,5 @@ function showResultError(msg) {
   resultPanel.innerHTML = ''
   downloadBtn.style.display = 'none'
 }
+
+renderToolUI()

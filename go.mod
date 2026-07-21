@@ -6,3 +6,5 @@ require (
 	github.com/ledongthuc/pdf v0.0.0-20220302134840-0c2507a12d80
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+require golang.org/x/text v0.20.0 // indirect

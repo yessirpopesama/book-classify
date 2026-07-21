@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: book-distribute-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./classifier_role.txt:/app/classifier_role.txt:ro
+      - ./data/uploads:/app/data/uploads
+      - ./data/results:/app/data/results
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: book-distribute-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8887:80"

@@ -1,0 +1,17 @@
+.git
+.vscode
+.DS_Store
+
+book-distribute
+result.txt
+目录.txt
+
+config.yaml
+data/uploads
+data/results
+source
+results
+
+frontend/node_modules
+frontend/dist
+frontend/.vite

@@ -23,7 +23,7 @@ kill_port() {
 }
 
 kill_port 8080
-kill_port 5173
+kill_port 8887
 
 # 启动后端
 echo "启动后端服务 (端口 8080)..."
@@ -40,14 +40,14 @@ if [ ! -d frontend/node_modules ]; then
 fi
 
 # 启动前端
-echo "启动前端服务 (端口 5173)..."
+echo "启动前端服务 (端口 8887)..."
 (cd frontend && npm run dev) &
 FRONTEND_PID=$!
 
 echo ""
 echo "=========================================="
-echo "  图书分类服务已启动"
-echo "  前端: http://localhost:5173"
+echo "  图书工具服务已启动"
+echo "  前端: http://localhost:8887"
 echo "  后端: http://localhost:8080"
 echo "=========================================="
 echo "按 Ctrl+C 停止所有服务"

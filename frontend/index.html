@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>图书分类 - 上传书籍</title>
+  <title>图书工具</title>
   <style>
     :root {
       --wx-green: #07C160;
@@ -25,7 +25,7 @@
       line-height: 1.5;
     }
     .container {
-      max-width: 780px;
+      max-width: 960px;
       margin: 0 auto;
       padding: 40px 24px;
     }
@@ -42,6 +42,34 @@
     header p {
       font-size: 15px;
       color: var(--text-secondary);
+    }
+    .tool-tabs {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin-bottom: 28px;
+      flex-wrap: wrap;
+    }
+    .tool-tab {
+      padding: 10px 20px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--card-bg);
+      color: var(--text-secondary);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: inherit;
+    }
+    .tool-tab:hover {
+      border-color: var(--wx-green);
+      color: var(--text);
+    }
+    .tool-tab.active {
+      background: rgba(7, 193, 96, 0.1);
+      border-color: var(--wx-green);
+      color: var(--wx-green);
     }
     .upload-zone {
       background: var(--card-bg);
@@ -88,39 +116,120 @@
     .upload-zone .folder-link:hover {
       text-decoration: underline;
     }
-    .file-list .item .path {
-      flex: 1;
+    input[type="file"] { display: none; }
+    .file-list-wrap {
+      display: none;
+      margin-bottom: 24px;
+    }
+    .file-list-wrap.has-files {
+      display: block;
+    }
+    .file-list-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .file-list-header strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .file-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    @media (min-width: 720px) {
+      .file-grid { grid-template-columns: repeat(5, 1fr); }
+    }
+    @media (min-width: 900px) {
+      .file-grid { grid-template-columns: repeat(6, 1fr); }
+    }
+    @media (max-width: 520px) {
+      .file-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+    .file-card {
+      position: relative;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 10px 12px;
+      text-align: center;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      min-width: 0;
+    }
+    .file-card:hover {
+      border-color: rgba(7, 193, 96, 0.45);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+    }
+    .file-card-remove {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 22px;
+      height: 22px;
+      border: none;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.06);
+      color: var(--text-secondary);
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s, background 0.15s, color 0.15s;
+      font-family: inherit;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .file-card:hover .file-card-remove {
+      opacity: 1;
+    }
+    .file-card-remove:hover {
+      background: #FF3B30;
+      color: #fff;
+    }
+    .file-card-icon {
+      width: 48px;
+      height: 56px;
+      margin: 0 auto 10px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    }
+    .file-card-icon.txt { background: linear-gradient(145deg, #34C759, #248A3D); }
+    .file-card-icon.pdf { background: linear-gradient(145deg, #FF3B30, #C1271A); }
+    .file-card-icon.epub { background: linear-gradient(145deg, #007AFF, #0051A8); }
+    .file-card-icon.mobi { background: linear-gradient(145deg, #FF9500, #C93400); }
+    .file-card-icon.other { background: linear-gradient(145deg, #8E8E93, #636366); }
+    .file-card-name {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      min-width: 0;
+      line-height: 1.35;
     }
-    .file-list .item .path .dir {
+    .file-card-dir {
+      font-size: 10px;
       color: var(--text-secondary);
-      font-size: 12px;
-    }
-    input[type="file"] { display: none; }
-    .file-list {
-      background: var(--card-bg);
-      border-radius: var(--radius);
       overflow: hidden;
-      margin-bottom: 24px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-top: 3px;
     }
-    .file-list .item {
-      display: flex;
-      align-items: center;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-      font-size: 14px;
+    @media (hover: none) {
+      .file-card-remove { opacity: 1; }
     }
-    .file-list .item:last-child { border-bottom: none; }
-    .file-list .item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-    .file-list .item .remove {
-      color: var(--text-secondary);
-      cursor: pointer;
-      padding: 4px;
-    }
-    .file-list .item .remove:hover { color: #FF3B30; }
     .actions {
       display: flex;
       gap: 12px;
@@ -406,18 +515,28 @@
   </div>
   <div class="container">
     <header>
-      <h1>图书分类</h1>
-      <p>上传书籍，智能分类，一键下载</p>
+      <h1>图书工具</h1>
+      <p id="pageSubtitle">上传书籍，智能分类，一键下载</p>
     </header>
+    <div class="tool-tabs" id="toolTabs">
+      <button type="button" class="tool-tab active" data-tool="classify">📚 图书分类</button>
+      <button type="button" class="tool-tab" data-tool="repair">🔧 内容修复</button>
+    </div>
+    <h2 id="pageTitle" style="font-size:20px;font-weight:600;margin-bottom:16px;text-align:center;">图书分类</h2>
     <div class="upload-zone" id="uploadZone">
-      <div class="icon">📚</div>
-      <div class="hint">点击或拖拽书籍、文件夹到此处</div>
-      <div class="sub">自动扫描子目录，仅收录 .txt、.pdf、.epub、.mobi</div>
+      <div class="icon" id="uploadIcon">📚</div>
+      <div class="hint" id="uploadHint">点击或拖拽书籍、文件夹到此处</div>
+      <div class="sub" id="uploadSub">自动扫描子目录，仅收录 .txt、.pdf、.epub、.mobi</div>
       <a href="#" class="folder-link" id="folderLink">选择文件夹</a>
       <input type="file" id="fileInput" multiple accept=".txt,.pdf,.epub,.mobi">
       <input type="file" id="folderInput" webkitdirectory directory multiple>
     </div>
-    <div class="file-list" id="fileList"></div>
+    <div class="file-list-wrap" id="fileListWrap">
+      <div class="file-list-header">
+        <span>已选 <strong id="fileCount">0</strong> 个文件</span>
+      </div>
+      <div class="file-grid" id="fileList"></div>
+    </div>
     <div class="actions">
       <button class="btn btn-secondary" id="clearBtn">清空</button>
       <button class="btn btn-primary" id="uploadBtn" disabled>开始上传并分类</button>
