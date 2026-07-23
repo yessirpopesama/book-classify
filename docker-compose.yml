@@ -12,6 +12,8 @@ services:
       - ./classifier_role.txt:/app/classifier_role.txt:ro
       - ./data/uploads:/app/data/uploads
       - ./data/results:/app/data/results
+      - ./data/repair_uploads:/app/data/repair_uploads
+      - ./data/repair_results:/app/data/repair_results
 
   frontend:
     build:

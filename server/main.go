@@ -2,7 +2,11 @@ package main
 
 import (
 	"archive/zip"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,12 +21,18 @@ import (
 )
 
 const (
-	uploadDir       = "data/uploads"
-	resultsDir      = "data/results"
-	repairUploadDir = "data/repair_uploads"
+	uploadDir        = "data/uploads"
+	resultsDir       = "data/results"
+	repairUploadDir  = "data/repair_uploads"
 	repairResultsDir = "data/repair_results"
-	port            = "8080"
-	frontendPort    = "8887"
+	port             = "8080"
+	maxUploadBytes   = 100 << 20
+	maxFileBytes     = 50 << 20
+	maxUploadFiles   = 100
+	maxJSONBodyBytes = 1 << 20
+	taskStateFile    = "data/tasks.json"
+	defaultTaskTTL   = 7 * 24 * time.Hour
+	defaultWorkers   = 2
 )
 
 const (
@@ -31,21 +41,305 @@ const (
 )
 
 var (
-	config     *service.Config
-	client     *service.DeepSeekClient
-	taskMu     sync.Mutex
-	taskStatus = make(map[string]*TaskStatus)
+	config         *service.Config
+	client         *service.DeepSeekClient
+	apiToken       string
+	allowedOrigins map[string]struct{}
+	taskRetention  time.Duration
+	taskMu         sync.RWMutex
+	taskStatus     = make(map[string]*TaskStatus)
+	taskCancels    = make(map[string]context.CancelFunc)
+	taskQueue      chan string
 )
 
 type TaskStatus struct {
 	ID        string    `json:"id"`
-	Type      string    `json:"type"` // classify, repair
-	Status    string    `json:"status"` // pending, processing, completed, failed
+	Type      string    `json:"type"`   // classify, repair
+	Status    string    `json:"status"` // pending, queued, processing, completed, failed, cancelled
 	Message   string    `json:"message"`
 	Total     int       `json:"total,omitempty"`
 	Current   int       `json:"current,omitempty"`
 	Progress  int       `json:"progress,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+func newTaskID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func validTaskID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil
+}
+
+func taskSnapshot(taskID string) *TaskStatus {
+	taskMu.RLock()
+	defer taskMu.RUnlock()
+	ts := taskStatus[taskID]
+	if ts == nil {
+		return nil
+	}
+	copy := *ts
+	return &copy
+}
+
+func enqueueTask(taskID, taskType, message string) error {
+	taskMu.Lock()
+	ts := taskStatus[taskID]
+	if ts == nil || ts.Type != taskType {
+		taskMu.Unlock()
+		return fmt.Errorf("任务不存在")
+	}
+	if ts.Status != "pending" {
+		taskMu.Unlock()
+		return fmt.Errorf("任务当前状态为 %s，不能重复启动", ts.Status)
+	}
+	ts.Status = "queued"
+	ts.Message = message
+	ts.Progress = 0
+	persistTaskStateLocked()
+	taskMu.Unlock()
+	select {
+	case taskQueue <- taskID:
+		return nil
+	default:
+		taskMu.Lock()
+		if current := taskStatus[taskID]; current != nil && current.Status == "queued" {
+			current.Status = "failed"
+			current.Message = "任务队列已满，请稍后重试"
+			persistTaskStateLocked()
+		}
+		taskMu.Unlock()
+		return fmt.Errorf("任务队列已满")
+	}
+
+}
+
+func startTaskWorkers(count int) {
+	if count < 1 {
+		count = defaultWorkers
+	}
+	taskQueue = make(chan string, count*16)
+	for i := 0; i < count; i++ {
+		go func() {
+			for taskID := range taskQueue {
+				runTask(taskID)
+			}
+		}()
+	}
+}
+
+func runTask(taskID string) {
+	taskMu.Lock()
+	ts := taskStatus[taskID]
+	if ts == nil || ts.Status != "queued" {
+		taskMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	taskCancels[taskID] = cancel
+	taskType := ts.Type
+	ts.Status = "processing"
+	ts.Message = "正在准备处理..."
+	persistTaskStateLocked()
+	taskMu.Unlock()
+
+	var err error
+	if taskType == TaskTypeClassify {
+		taskDir := filepath.Join(uploadDir, taskID)
+		resultDir := filepath.Join(resultsDir, taskID)
+		err = service.ClassifyAndMoveContext(ctx, taskDir, resultDir, client, config.CLCIndexFile, func(done, total int, fileName string) {
+			updateTaskProgress(taskID, done, total, fileName, "分类")
+		})
+		if rmErr := os.RemoveAll(taskDir); rmErr != nil {
+			log.Printf("清理上传临时目录失败 %s: %v", taskDir, rmErr)
+		}
+	} else {
+		taskDir := filepath.Join(repairUploadDir, taskID)
+		resultDir := filepath.Join(repairResultsDir, taskID)
+		err = service.RepairBooksContext(ctx, taskDir, resultDir, func(done, total int, fileName string) {
+			updateTaskProgress(taskID, done, total, fileName, "修复")
+		})
+		if rmErr := os.RemoveAll(taskDir); rmErr != nil {
+			log.Printf("清理修复上传临时目录失败 %s: %v", taskDir, rmErr)
+		}
+	}
+	cancel()
+
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	delete(taskCancels, taskID)
+	ts = taskStatus[taskID]
+	if ts == nil {
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		ts.Status = "cancelled"
+		ts.Message = "任务已取消"
+	} else if err != nil {
+		ts.Status = "failed"
+		ts.Message = err.Error()
+	} else {
+		ts.Status = "completed"
+		ts.Message = "处理完成"
+		ts.Progress = 100
+		if ts.Total > 0 {
+			ts.Current = ts.Total
+		}
+	}
+	persistTaskStateLocked()
+}
+
+func cancelTask(taskID string) error {
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	ts := taskStatus[taskID]
+	if ts == nil {
+		return fmt.Errorf("任务不存在")
+	}
+	switch ts.Status {
+	case "queued", "pending":
+		ts.Status = "cancelled"
+		ts.Message = "任务已取消"
+	case "processing":
+		cancel := taskCancels[taskID]
+		if cancel == nil {
+			return fmt.Errorf("任务正在启动，请稍后重试")
+		}
+		ts.Message = "正在取消任务..."
+		cancel()
+	default:
+		return fmt.Errorf("任务当前状态为 %s，不能取消", ts.Status)
+	}
+	persistTaskStateLocked()
+	return nil
+}
+
+func persistTaskStateLocked() {
+	state := make(map[string]TaskStatus, len(taskStatus))
+	for id, status := range taskStatus {
+		state[id] = *status
+	}
+	if err := os.MkdirAll(filepath.Dir(taskStateFile), 0755); err != nil {
+		log.Printf("创建任务状态目录失败: %v", err)
+		return
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(taskStateFile), ".tasks-*.json")
+	if err != nil {
+		log.Printf("创建任务状态临时文件失败: %v", err)
+		return
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	encoder := json.NewEncoder(tmp)
+	if err := encoder.Encode(state); err != nil {
+		tmp.Close()
+		log.Printf("写入任务状态失败: %v", err)
+		return
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		log.Printf("设置任务状态文件权限失败: %v", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		log.Printf("关闭任务状态文件失败: %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, taskStateFile); err != nil {
+		log.Printf("保存任务状态失败: %v", err)
+	}
+}
+
+func loadTaskState() {
+	data, err := os.ReadFile(taskStateFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("读取任务状态失败: %v", err)
+		}
+		return
+	}
+	var state map[string]TaskStatus
+	if err := json.Unmarshal(data, &state); err != nil {
+		log.Printf("解析任务状态失败: %v", err)
+		return
+	}
+
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	interrupted := 0
+	for id, status := range state {
+		if !validTaskID(id) || status.ID != id || (status.Type != TaskTypeClassify && status.Type != TaskTypeRepair) {
+			continue
+		}
+		if status.Status == "processing" || status.Status == "queued" || status.Status == "pending" {
+			status.Status = "failed"
+			status.Message = "服务重启导致任务中断，请重新上传并处理"
+			interrupted++
+		}
+		copy := status
+		taskStatus[id] = &copy
+	}
+	if interrupted > 0 {
+		persistTaskStateLocked()
+		log.Printf("已将 %d 个中断任务标记为失败", interrupted)
+	}
+}
+
+func cleanupExpiredTasks() {
+	if taskRetention <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-taskRetention)
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	changed := false
+	for id, status := range taskStatus {
+		if status.Status == "processing" || status.Status == "queued" || status.CreatedAt.IsZero() || status.CreatedAt.After(cutoff) {
+			continue
+		}
+		if err := removeTaskData(id); err != nil {
+			log.Printf("清理过期任务 %s 失败: %v", id, err)
+			continue
+		}
+		delete(taskStatus, id)
+		changed = true
+	}
+	if changed {
+		persistTaskStateLocked()
+	}
+}
+
+func removeTaskData(taskID string) error {
+	if !validTaskID(taskID) {
+		return fmt.Errorf("无效 task_id")
+	}
+	for _, dir := range []string{uploadDir, resultsDir, repairUploadDir, repairResultsDir} {
+		if err := os.RemoveAll(filepath.Join(dir, taskID)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func startTaskCleanupLoop() {
+	if taskRetention <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			cleanupExpiredTasks()
+		}
+	}()
 }
 
 func updateTaskProgress(taskID string, done, total int, fileName, action string) {
@@ -73,37 +367,47 @@ func main() {
 	}
 	role := service.LoadClassifierRole(config.ClassifierPromptFile)
 	client = service.NewDeepSeekClient(config.DeepSeekAPIKey, role)
+	apiToken = strings.TrimSpace(os.Getenv("BOOK_DISTRIBUTE_API_TOKEN"))
+	if apiToken == "" {
+		apiToken = strings.TrimSpace(config.APIAuthToken)
+	}
+	allowedOrigins = makeAllowedOrigins(config.AllowedOrigins)
+	taskRetention = defaultTaskTTL
+	if config.TaskRetentionHours > 0 {
+		taskRetention = time.Duration(config.TaskRetentionHours) * time.Hour
+	}
+	workers := config.MaxConcurrentTasks
+	if workers < 1 {
+		workers = defaultWorkers
+	}
+	if apiToken == "" {
+		log.Printf("警告: 未配置 API Token；服务仅适合受信任的本地网络")
+	}
 
-	os.MkdirAll(uploadDir, 0755)
-	os.MkdirAll(resultsDir, 0755)
-	os.MkdirAll(repairUploadDir, 0755)
-	os.MkdirAll(repairResultsDir, 0755)
+	for _, dir := range dataTaskDirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Fatalf("创建运行时目录 %s 失败: %v", dir, err)
+		}
+	}
+	loadTaskState()
+	cleanupExpiredTasks()
+	startTaskCleanupLoop()
+	startTaskWorkers(workers)
 
-	http.HandleFunc("/api/upload", cors(handleUpload))
-	http.HandleFunc("/api/classify", cors(handleClassify))
-	http.HandleFunc("/api/repair/upload", cors(handleRepairUpload))
-	http.HandleFunc("/api/repair/results/", cors(handleRepairResults))
-	http.HandleFunc("/api/repair", cors(handleRepair))
-	http.HandleFunc("/api/results/", cors(handleResults))
-	http.HandleFunc("/api/status/", cors(handleStatus))
-	http.HandleFunc("/api/download/", cors(handleDownload))
-	http.HandleFunc("/api/clear", cors(handleClear))
+	mux := http.NewServeMux()
+	registerRoutes(mux)
 
 	log.Printf("后端服务启动: http://localhost:%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
-}
-
-func cors(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		next(w, r)
+	server := &http.Server{
+		Addr:              ":" + port,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      10 * time.Minute,
+		IdleTimeout:       time.Minute,
+		MaxHeaderBytes:    1 << 20,
+		Handler:           mux,
 	}
+	log.Fatal(server.ListenAndServe())
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -112,17 +416,30 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID, err := newTaskID()
+	if err != nil {
+		jsonError(w, "创建任务失败", http.StatusInternalServerError)
+		return
+	}
 	taskDir := filepath.Join(uploadDir, taskID)
-	os.MkdirAll(taskDir, 0755)
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		jsonError(w, "创建任务目录失败", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if taskSnapshot(taskID) == nil {
+			_ = os.RemoveAll(taskDir)
+		}
+	}()
 
-	if err := r.ParseMultipartForm(100 << 20); err != nil { // 100MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
 		jsonError(w, "解析表单失败", http.StatusBadRequest)
 		return
 	}
 
 	files := r.MultipartForm.File["files"]
-	if len(files) == 0 {
+	if len(files) == 0 || len(files) > maxUploadFiles {
 		jsonError(w, "请选择要上传的文件", http.StatusBadRequest)
 		return
 	}
@@ -134,6 +451,9 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		rel := filepath.Clean(filepath.FromSlash(fh.Filename))
 		if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			continue
+		}
+		if fh.Size > maxFileBytes {
 			continue
 		}
 		f, err := fh.Open()
@@ -150,9 +470,13 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			f.Close()
 			continue
 		}
-		io.Copy(out, f)
+		written, copyErr := io.Copy(out, io.LimitReader(f, maxFileBytes+1))
+		closeErr := out.Close()
 		f.Close()
-		out.Close()
+		if copyErr != nil || closeErr != nil || written > maxFileBytes {
+			_ = os.Remove(dst)
+			continue
+		}
 		uploaded++
 	}
 
@@ -168,6 +492,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		Total: uploaded, Current: 0, Progress: 0,
 		CreatedAt: time.Now(),
 	}
+	persistTaskStateLocked()
 	taskMu.Unlock()
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -185,57 +510,37 @@ func handleClassify(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TaskID string `json:"task_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == "" {
+	if err := decodeJSON(w, r, &req); err != nil || req.TaskID == "" {
 		jsonError(w, "缺少 task_id", http.StatusBadRequest)
 		return
 	}
 
+	if !validTaskID(req.TaskID) {
+		jsonError(w, "无效 task_id", http.StatusBadRequest)
+		return
+	}
 	taskDir := filepath.Join(uploadDir, req.TaskID)
-	taskResultsDir := filepath.Join(resultsDir, req.TaskID)
 
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		jsonError(w, "任务不存在", http.StatusNotFound)
 		return
 	}
 
-	taskMu.Lock()
-	taskStatus[req.TaskID].Status = "processing"
-	taskStatus[req.TaskID].Message = "正在准备分类..."
-	taskStatus[req.TaskID].Progress = 0
-	taskMu.Unlock()
+	if err := enqueueTask(req.TaskID, TaskTypeClassify, "任务已进入分类队列..."); err != nil {
+		jsonError(w, err.Error(), http.StatusConflict)
+		return
+	}
 
-	taskID := req.TaskID
-	go func() {
-		os.MkdirAll(taskResultsDir, 0755)
-		err := service.ClassifyAndMove(taskDir, taskResultsDir, client, config.CLCIndexFile, func(done, total int, fileName string) {
-			updateTaskProgress(taskID, done, total, fileName, "分类")
-		})
-		if rmErr := os.RemoveAll(taskDir); rmErr != nil {
-			log.Printf("清理上传临时目录失败 %s: %v", taskDir, rmErr)
-		}
-		taskMu.Lock()
-		defer taskMu.Unlock()
-		if err != nil {
-			taskStatus[taskID].Status = "failed"
-			taskStatus[taskID].Message = err.Error()
-		} else {
-			taskStatus[taskID].Status = "completed"
-			taskStatus[taskID].Message = "分类完成"
-			taskStatus[taskID].Progress = 100
-			if taskStatus[taskID].Total > 0 {
-				taskStatus[taskID].Current = taskStatus[taskID].Total
-			}
-		}
-	}()
-
-	json.NewEncoder(w).Encode(map[string]string{"message": "分类已启动"})
+	json.NewEncoder(w).Encode(map[string]string{"message": "分类任务已入队"})
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimPrefix(r.URL.Path, "/api/status/")
-	taskMu.Lock()
-	ts := taskStatus[taskID]
-	taskMu.Unlock()
+	if !validTaskID(taskID) {
+		jsonError(w, "无效 task_id", http.StatusBadRequest)
+		return
+	}
+	ts := taskSnapshot(taskID)
 	if ts == nil {
 		jsonError(w, "任务不存在", http.StatusNotFound)
 		return
@@ -245,9 +550,11 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func handleDownload(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimPrefix(r.URL.Path, "/api/download/")
-	taskMu.Lock()
-	ts := taskStatus[taskID]
-	taskMu.Unlock()
+	if !validTaskID(taskID) {
+		jsonError(w, "无效 task_id", http.StatusBadRequest)
+		return
+	}
+	ts := taskSnapshot(taskID)
 	if ts == nil || ts.Status != "completed" {
 		jsonError(w, "任务未完成或不存在", http.StatusBadRequest)
 		return
@@ -259,8 +566,19 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		zipName = "repaired.zip"
 	}
 
-	zipPath := filepath.Join(filepath.Dir(taskResultsDir), taskID+".zip")
+	tmp, err := os.CreateTemp(filepath.Dir(taskResultsDir), ".book-distribute-download-*.zip")
+	if err != nil {
+		jsonError(w, "创建下载文件失败", http.StatusInternalServerError)
+		return
+	}
+	zipPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(zipPath)
+		jsonError(w, "创建下载文件失败", http.StatusInternalServerError)
+		return
+	}
 	if err := zipDir(taskResultsDir, zipPath); err != nil {
+		_ = os.Remove(zipPath)
 		jsonError(w, "打包失败", http.StatusInternalServerError)
 		return
 	}
@@ -268,7 +586,11 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Disposition", "attachment; filename="+zipName)
 	w.Header().Set("Content-Type", "application/zip")
-	f, _ := os.Open(zipPath)
+	f, err := os.Open(zipPath)
+	if err != nil {
+		jsonError(w, "打开下载文件失败", http.StatusInternalServerError)
+		return
+	}
 	defer f.Close()
 	io.Copy(w, f)
 }
@@ -315,10 +637,12 @@ type ResultRow struct {
 
 func handleResults(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimPrefix(r.URL.Path, "/api/results/")
-	taskMu.Lock()
-	ts := taskStatus[taskID]
-	taskMu.Unlock()
-	if ts == nil || ts.Status != "completed" {
+	if !validTaskID(taskID) {
+		jsonError(w, "无效 task_id", http.StatusBadRequest)
+		return
+	}
+	ts := taskSnapshot(taskID)
+	if ts == nil || ts.Status != "completed" || ts.Type != TaskTypeClassify {
 		jsonError(w, "任务未完成或不存在", http.StatusBadRequest)
 		return
 	}
@@ -373,17 +697,30 @@ func handleRepairUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	taskID := fmt.Sprintf("%d", time.Now().UnixNano())
+	taskID, err := newTaskID()
+	if err != nil {
+		jsonError(w, "创建任务失败", http.StatusInternalServerError)
+		return
+	}
 	taskDir := filepath.Join(repairUploadDir, taskID)
-	os.MkdirAll(taskDir, 0755)
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		jsonError(w, "创建任务目录失败", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		if taskSnapshot(taskID) == nil {
+			_ = os.RemoveAll(taskDir)
+		}
+	}()
 
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
 		jsonError(w, "解析表单失败", http.StatusBadRequest)
 		return
 	}
 
 	files := r.MultipartForm.File["files"]
-	if len(files) == 0 {
+	if len(files) == 0 || len(files) > maxUploadFiles {
 		jsonError(w, "请选择要上传的文件", http.StatusBadRequest)
 		return
 	}
@@ -395,6 +732,9 @@ func handleRepairUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		rel := filepath.Clean(filepath.FromSlash(fh.Filename))
 		if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			continue
+		}
+		if fh.Size > maxFileBytes {
 			continue
 		}
 		f, err := fh.Open()
@@ -411,9 +751,13 @@ func handleRepairUpload(w http.ResponseWriter, r *http.Request) {
 			f.Close()
 			continue
 		}
-		io.Copy(out, f)
+		written, copyErr := io.Copy(out, io.LimitReader(f, maxFileBytes+1))
+		closeErr := out.Close()
 		f.Close()
-		out.Close()
+		if copyErr != nil || closeErr != nil || written > maxFileBytes {
+			_ = os.Remove(dst)
+			continue
+		}
 		uploaded++
 	}
 
@@ -429,6 +773,7 @@ func handleRepairUpload(w http.ResponseWriter, r *http.Request) {
 		Total: uploaded, Current: 0, Progress: 0,
 		CreatedAt: time.Now(),
 	}
+	persistTaskStateLocked()
 	taskMu.Unlock()
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -446,55 +791,28 @@ func handleRepair(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TaskID string `json:"task_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == "" {
+	if err := decodeJSON(w, r, &req); err != nil || req.TaskID == "" {
 		jsonError(w, "缺少 task_id", http.StatusBadRequest)
 		return
 	}
 
+	if !validTaskID(req.TaskID) {
+		jsonError(w, "无效 task_id", http.StatusBadRequest)
+		return
+	}
 	taskDir := filepath.Join(repairUploadDir, req.TaskID)
-	taskResultsDir := filepath.Join(repairResultsDir, req.TaskID)
 
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		jsonError(w, "任务不存在", http.StatusNotFound)
 		return
 	}
 
-	taskMu.Lock()
-	if taskStatus[req.TaskID] == nil {
-		taskMu.Unlock()
-		jsonError(w, "任务不存在", http.StatusNotFound)
+	if err := enqueueTask(req.TaskID, TaskTypeRepair, "任务已进入修复队列..."); err != nil {
+		jsonError(w, err.Error(), http.StatusConflict)
 		return
 	}
-	taskStatus[req.TaskID].Status = "processing"
-	taskStatus[req.TaskID].Message = "正在准备修复..."
-	taskStatus[req.TaskID].Progress = 0
-	taskMu.Unlock()
 
-	taskID := req.TaskID
-	go func() {
-		os.MkdirAll(taskResultsDir, 0755)
-		err := service.RepairBooks(taskDir, taskResultsDir, func(done, total int, fileName string) {
-			updateTaskProgress(taskID, done, total, fileName, "修复")
-		})
-		if rmErr := os.RemoveAll(taskDir); rmErr != nil {
-			log.Printf("清理修复上传临时目录失败 %s: %v", taskDir, rmErr)
-		}
-		taskMu.Lock()
-		defer taskMu.Unlock()
-		if err != nil {
-			taskStatus[taskID].Status = "failed"
-			taskStatus[taskID].Message = err.Error()
-		} else {
-			taskStatus[taskID].Status = "completed"
-			taskStatus[taskID].Message = "修复完成"
-			taskStatus[taskID].Progress = 100
-			if taskStatus[taskID].Total > 0 {
-				taskStatus[taskID].Current = taskStatus[taskID].Total
-			}
-		}
-	}()
-
-	json.NewEncoder(w).Encode(map[string]string{"message": "修复已启动"})
+	json.NewEncoder(w).Encode(map[string]string{"message": "修复任务已入队"})
 }
 
 type RepairResultRow struct {
@@ -519,9 +837,11 @@ type RepairResultRow struct {
 
 func handleRepairResults(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.TrimPrefix(r.URL.Path, "/api/repair/results/")
-	taskMu.Lock()
-	ts := taskStatus[taskID]
-	taskMu.Unlock()
+	if !validTaskID(taskID) {
+		jsonError(w, "无效 task_id", http.StatusBadRequest)
+		return
+	}
+	ts := taskSnapshot(taskID)
 	if ts == nil || ts.Status != "completed" || ts.Type != TaskTypeRepair {
 		jsonError(w, "任务未完成或不存在", http.StatusBadRequest)
 		return
@@ -617,6 +937,12 @@ func handleClear(w http.ResponseWriter, r *http.Request) {
 
 	taskMu.Lock()
 	defer taskMu.Unlock()
+	for _, ts := range taskStatus {
+		if ts.Status == "processing" || ts.Status == "queued" {
+			jsonError(w, "存在正在处理的任务，不能清空", http.StatusConflict)
+			return
+		}
+	}
 
 	for _, dir := range dataTaskDirs {
 		if err := clearTaskDataDir(dir); err != nil {
@@ -626,9 +952,29 @@ func handleClear(w http.ResponseWriter, r *http.Request) {
 	}
 
 	taskStatus = make(map[string]*TaskStatus)
+	persistTaskStateLocked()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"message": "已清空本地任务数据"})
+}
+
+func handleCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil || !validTaskID(req.TaskID) {
+		jsonError(w, "无效 task_id", http.StatusBadRequest)
+		return
+	}
+	if err := cancelTask(req.TaskID); err != nil {
+		jsonError(w, err.Error(), http.StatusConflict)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"message": "取消请求已提交"})
 }
 
 func clearTaskDataDir(dir string) error {

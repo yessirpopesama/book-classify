@@ -2,22 +2,24 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // BookAnalysis 书籍分析结果
 type BookAnalysis struct {
-	Classification   string   `json:"classification"`    // 分类号
-	ClassificationPath string `json:"classification_path"` // 最优分类路径
-	CategoryLevels   []string `json:"category_levels"`   // 完整类目层级（从一级到最专指）
-	LibraryReference string   `json:"library_reference"` // 各馆参考分类对照
-	Author           string   `json:"author"`            // 书籍作者
-	Nationality      string   `json:"nationality"`       // 书籍国籍
+	Classification     string   `json:"classification"`      // 分类号
+	ClassificationPath string   `json:"classification_path"` // 最优分类路径
+	CategoryLevels     []string `json:"category_levels"`     // 完整类目层级（从一级到最专指）
+	LibraryReference   string   `json:"library_reference"`   // 各馆参考分类对照
+	Author             string   `json:"author"`              // 书籍作者
+	Nationality        string   `json:"nationality"`         // 书籍国籍
 }
 
 // DeepSeekClient DeepSeek API客户端
@@ -54,7 +56,7 @@ type ChatResponse struct {
 	} `json:"choices"`
 }
 
-// NewDeepSeekClient 创建新的 DeepSeek 客户端（不设 HTTP 超时，避免批量分类时被中断）。
+// NewDeepSeekClient 创建新的 DeepSeek 客户端。单次请求设置上限，避免异常连接阻塞整个任务。
 // systemPrompt 为图书馆分类员角色提示词；为空时回退到内置默认角色。
 func NewDeepSeekClient(apiKey, systemPrompt string) *DeepSeekClient {
 	if strings.TrimSpace(systemPrompt) == "" {
@@ -63,7 +65,7 @@ func NewDeepSeekClient(apiKey, systemPrompt string) *DeepSeekClient {
 	return &DeepSeekClient{
 		apiKey: apiKey,
 		client: &http.Client{
-			Timeout: 0,
+			Timeout: 90 * time.Second,
 		},
 		apiURL:       "https://api.deepseek.com/v1/chat/completions",
 		systemPrompt: systemPrompt,
@@ -72,6 +74,11 @@ func NewDeepSeekClient(apiKey, systemPrompt string) *DeepSeekClient {
 
 // AnalyzeBook 根据书名和正文第一页（约1000字）内容，分析并返回分类号、作者、国籍
 func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysis, error) {
+	return c.AnalyzeBookContext(context.Background(), bookName, bookContent)
+}
+
+// AnalyzeBookContext 支持调用方取消正在进行的 API 请求。
+func (c *DeepSeekClient) AnalyzeBookContext(ctx context.Context, bookName, bookContent string) (*BookAnalysis, error) {
 	systemPrompt := c.systemPrompt
 	if strings.TrimSpace(systemPrompt) == "" {
 		systemPrompt = defaultClassifierRole
@@ -99,7 +106,7 @@ func (c *DeepSeekClient) AnalyzeBook(bookName, bookContent string) (*BookAnalysi
 		return nil, fmt.Errorf("序列化请求失败: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", c.apiURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}

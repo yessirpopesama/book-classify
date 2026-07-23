@@ -4,6 +4,19 @@ import (
 	"testing"
 )
 
+func TestSafeClassificationDir(t *testing.T) {
+	for _, code := range []string{"B31/39", "C829.3/.7", "[I247.5]"} {
+		if _, err := safeClassificationDir(code); err != nil {
+			t.Fatalf("expected %q to be accepted: %v", code, err)
+		}
+	}
+	for _, code := range []string{"../escape", "A/../escape", "A\\escape", "", "123"} {
+		if _, err := safeClassificationDir(code); err == nil {
+			t.Fatalf("expected %q to be rejected", code)
+		}
+	}
+}
+
 func TestCLCValidate_FinalCodeMatch(t *testing.T) {
 	idx, err := LoadCLCIndex(DefaultCLCIndexPath)
 	if err != nil {

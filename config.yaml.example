@@ -1,6 +1,20 @@
 # DeepSeek API配置
 deepseek_api_key: your_api_key_here
 
+# 可选：保护 HTTP API。设置后，调用方必须提供 X-API-Token 请求头。
+# 生产环境更建议设置环境变量 BOOK_DISTRIBUTE_API_TOKEN，避免令牌出现在配置文件中。
+# api_auth_token: replace-with-a-long-random-token
+
+# 可选：允许跨域调用 API 的前端来源。为空时只允许本机开发前端地址。
+# allowed_origins:
+#   - https://books.example.com
+
+# 可选：已完成和失败任务的保留时长（小时），默认 168（7 天）。
+# task_retention_hours: 168
+
+# 可选：同时执行的任务数，默认 2。请结合 DeepSeek API 限流设置。
+# max_concurrent_tasks: 2
+
 # 可选：图书馆分类员角色提示词文件路径（持久保存、可随时编辑，改动后无需重新编译）。
 # 不填则使用工作目录下的 classifier_role.txt；该文件首次运行会自动生成，可直接编辑。
 # classifier_prompt_file: classifier_role.txt

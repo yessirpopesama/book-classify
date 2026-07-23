@@ -16,6 +16,7 @@ book-distribute
 # Dependency directories
 vendor/
 node_modules/
+frontend/dist/
 
 # Go workspace file
 go.work

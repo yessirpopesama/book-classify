@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -19,9 +21,26 @@ type analysisResultItem struct {
 // ClassifyProgressFunc 分类进度回调：done 为已完成数量，total 为总文件数，fileName 为当前处理的文件名
 type ClassifyProgressFunc func(done, total int, fileName string)
 
+// CLC 类号允许范围。斜杠是中图法范围类号的一部分（例如 B31/39），
+// 但绝不允许路径回退或平台路径分隔符。
+var safeClassificationRe = regexp.MustCompile(`^[A-Z][A-Z0-9./-]*$`)
+
+func safeClassificationDir(classification string) (string, error) {
+	classification = strings.Trim(strings.TrimSpace(classification), "[]")
+	if classification == "" || !safeClassificationRe.MatchString(classification) || strings.Contains(classification, "..") || strings.Contains(classification, `\\`) {
+		return "", fmt.Errorf("非法分类号: %q", classification)
+	}
+	return classification, nil
+}
+
 // ClassifyAndMove 分类并移动文件
 // 读取每本书正文第一页（约1000字），分析作者、国籍、分类号及类目层级，输出分类号、书籍作者、书籍国籍
 func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient, clcIndexFile string, onProgress ...ClassifyProgressFunc) error {
+	return ClassifyAndMoveContext(context.Background(), sourceDir, resultsDir, client, clcIndexFile, onProgress...)
+}
+
+// ClassifyAndMoveContext 支持在单本书处理边界和 API 调用期间取消任务。
+func ClassifyAndMoveContext(ctx context.Context, sourceDir, resultsDir string, client *DeepSeekClient, clcIndexFile string, onProgress ...ClassifyProgressFunc) error {
 	var progress ClassifyProgressFunc
 	if len(onProgress) > 0 {
 		progress = onProgress[0]
@@ -58,6 +77,9 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient, clcIn
 	failCount := 0
 
 	for i, relPath := range filePaths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		fileName := filepath.Base(relPath)
 		if progress != nil {
 			progress(i, len(filePaths), fileName)
@@ -82,8 +104,11 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient, clcIn
 		fmt.Printf("  已读取正文（约%d字）\n", len([]rune(bookContent)))
 
 		// 调用API分析
-		analysis, err := client.AnalyzeBook(fileName, bookContent)
+		analysis, err := client.AnalyzeBookContext(ctx, fileName, bookContent)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			fmt.Printf("  分析失败: %v\n", err)
 			pendingResults = append(pendingResults, analysisResultItem{fileName: fileName, err: err})
 			moveToUnrecognized(sourceDir, relPath, resultsDir, fileName, &successCount, &failCount)
@@ -139,13 +164,19 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient, clcIn
 				fmt.Printf("  最优分类路径: %s\n", analysis.ClassificationPath)
 			}
 		}
-
-		successResults = append(successResults, analysisResultItem{fileName: fileName, analysis: analysis})
+		classification, err = safeClassificationDir(analysis.Classification)
+		if err != nil {
+			fmt.Printf("  分类号不安全，移至未识别文件夹: %v\n", err)
+			moveToUnrecognized(sourceDir, relPath, resultsDir, fileName, &successCount, &failCount)
+			pendingResults = append(pendingResults, analysisResultItem{fileName: fileName, analysis: analysis, err: err})
+			continue
+		}
 
 		// 创建分类目录并移动
 		classDir := filepath.Join(resultsDir, classification)
 		if err := os.MkdirAll(classDir, 0755); err != nil {
 			fmt.Printf("  创建分类目录失败: %v\n", err)
+			pendingResults = append(pendingResults, analysisResultItem{fileName: fileName, analysis: analysis, err: err})
 			failCount++
 			continue
 		}
@@ -154,10 +185,12 @@ func ClassifyAndMove(sourceDir, resultsDir string, client *DeepSeekClient, clcIn
 		destPath := filepath.Join(classDir, fileName)
 		if err := moveFile(srcPath, destPath); err != nil {
 			fmt.Printf("  移动文件失败: %v\n", err)
+			pendingResults = append(pendingResults, analysisResultItem{fileName: fileName, analysis: analysis, err: err})
 			failCount++
 			continue
 		}
 
+		successResults = append(successResults, analysisResultItem{fileName: fileName, analysis: analysis})
 		fmt.Printf("  已移动到: %s/\n", classification)
 		successCount++
 	}
@@ -315,7 +348,6 @@ func moveToUnrecognized(sourceDir, relPath, resultsDir, fileName string, success
 		return
 	}
 	fmt.Printf("  已移动到: %s/\n", UnrecognizedDir)
-	*successCount++
 	*failCount++
 }
 

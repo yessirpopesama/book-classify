@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -70,9 +71,9 @@ func ListTxtFiles(sourceDir string) ([]string, error) {
 	excluded := map[string]bool{
 		RepairReportFile:     true,
 		RepairReportJSONFile: true,
-		"结果.txt":           true,
-		"待进行分类.txt":        true,
-		".DS_Store":        true,
+		"结果.txt":             true,
+		"待进行分类.txt":          true,
+		".DS_Store":          true,
 	}
 
 	var paths []string
@@ -98,6 +99,11 @@ func ListTxtFiles(sourceDir string) ([]string, error) {
 
 // RepairBooks 修复上传目录中的 txt 图书，输出到 resultsDir
 func RepairBooks(sourceDir, resultsDir string, onProgress ...RepairProgressFunc) error {
+	return RepairBooksContext(context.Background(), sourceDir, resultsDir, onProgress...)
+}
+
+// RepairBooksContext 支持在每个文件处理边界取消任务。
+func RepairBooksContext(ctx context.Context, sourceDir, resultsDir string, onProgress ...RepairProgressFunc) error {
 	var progress RepairProgressFunc
 	if len(onProgress) > 0 {
 		progress = onProgress[0]
@@ -120,6 +126,9 @@ func RepairBooks(sourceDir, resultsDir string, onProgress ...RepairProgressFunc)
 	failed := 0
 
 	for i, relPath := range filePaths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		origName := filepath.Base(relPath)
 		if progress != nil {
 			progress(i, len(filePaths), origName)

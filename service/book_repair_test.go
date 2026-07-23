@@ -56,9 +56,20 @@ func TestDecodeTextBytes(t *testing.T) {
 	}
 }
 
+func TestDecodeUTF16SurrogatePair(t *testing.T) {
+	// U+1F600 GRINNING FACE in UTF-16LE.
+	got := decodeUTF16([]byte{0x3d, 0xd8, 0x00, 0xde}, true)
+	if got != "😀" {
+		t.Fatalf("decodeUTF16() = %q, want 😀", got)
+	}
+}
+
 func TestRepairTextContent(t *testing.T) {
 	input := "第一章\r\n\r\n正文内容\r\n\r\n\r\n\r\n\r\n请访问 www.example.com 下载更多\r\n第二段"
 	out, stats := RepairTextContent(input)
+	if !stats.LineEndingsFixed {
+		t.Fatal("expected CRLF normalization to be reported")
+	}
 	if stats.RemovedLines != 1 {
 		t.Fatalf("expected 1 removed line, got %d", stats.RemovedLines)
 	}

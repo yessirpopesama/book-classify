@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -14,8 +15,8 @@ import (
 
 var (
 	repairHTMLTagRe = regexp.MustCompile(`(?i)<[^>]+>`)
-	urlRe          = regexp.MustCompile(`(?i)(?:https?://|www\.|ftp://)[^\s\p{Han}]+`)
-	adLinePatterns = []*regexp.Regexp{
+	urlRe           = regexp.MustCompile(`(?i)(?:https?://|www\.|ftp://)[^\s\p{Han}]+`)
+	adLinePatterns  = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)^[\s【\[\(（]*(?:请访问|访问|下载|更多精彩|本书来自|书源|txt80|bbs\.|forum\.|zol\.|bookbao|qidian|douban)[^\n]*$`),
 		regexp.MustCompile(`(?i)^[\s\-—=_*#]*(?:广告|推广|赞助)[^\n]*$`),
 		regexp.MustCompile(`(?i)^[\s【\[\(（]*(?:www\.|http)[^\n]*$`),
@@ -86,20 +87,15 @@ func decodeUTF16(b []byte, littleEndian bool) string {
 	if len(b)%2 != 0 {
 		b = b[:len(b)-1]
 	}
-	runes := make([]rune, 0, len(b)/2)
+	units := make([]uint16, 0, len(b)/2)
 	for i := 0; i+1 < len(b); i += 2 {
-		var r rune
 		if littleEndian {
-			r = rune(b[i]) | rune(b[i+1])<<8
+			units = append(units, uint16(b[i])|uint16(b[i+1])<<8)
 		} else {
-			r = rune(b[i])<<8 | rune(b[i+1])
+			units = append(units, uint16(b[i])<<8|uint16(b[i+1]))
 		}
-		if r == 0 {
-			continue
-		}
-		runes = append(runes, r)
 	}
-	return string(runes)
+	return string(utf16.Decode(units))
 }
 
 func transformBytes(raw []byte, t transform.Transformer) (string, error) {
@@ -136,9 +132,9 @@ func RepairTextContent(text string) (string, RepairTextStats) {
 	}
 	text = withoutZW
 	text = strings.ReplaceAll(text, "\x00", "")
+	stats.LineEndingsFixed = strings.Contains(text, "\r")
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
-	stats.LineEndingsFixed = strings.Contains(text, "\r")
 
 	if repairHTMLTagRe.MatchString(text) {
 		stats.HTMLRemoved = true

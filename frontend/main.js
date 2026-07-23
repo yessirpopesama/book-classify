@@ -1,4 +1,21 @@
 const API_BASE = '/api'
+const API_TOKEN_STORAGE_KEY = 'book-distribute-api-token'
+
+async function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {})
+  const token = localStorage.getItem(API_TOKEN_STORAGE_KEY)
+  if (token) headers.set('X-API-Token', token)
+
+  let response = await fetch(url, { ...options, headers })
+  if (response.status !== 401) return response
+
+  const entered = window.prompt('此服务需要 API Token，请输入：')
+  if (!entered) return response
+  localStorage.setItem(API_TOKEN_STORAGE_KEY, entered.trim())
+  headers.set('X-API-Token', entered.trim())
+  response = await fetch(url, { ...options, headers })
+  return response
+}
 
 const TOOLS = {
   classify: {
@@ -52,6 +69,7 @@ const TOOLS = {
 
 let currentTool = 'classify'
 let selectedFiles = []
+let activeTaskID = ''
 
 const uploadZone = document.getElementById('uploadZone')
 const fileInput = document.getElementById('fileInput')
@@ -67,11 +85,56 @@ const statusText = document.getElementById('statusText')
 const statusMsg = document.getElementById('statusMsg')
 const resultPanel = document.getElementById('resultPanel')
 const downloadBtn = document.getElementById('downloadBtn')
+const cancelTaskBtn = document.getElementById('cancelTaskBtn')
 const loadingOverlay = document.getElementById('loadingOverlay')
 const loadingTitle = document.getElementById('loadingTitle')
 const loadingSub = document.getElementById('loadingSub')
 const loadingProgressBar = document.getElementById('loadingProgressBar')
 const loadingProgressText = document.getElementById('loadingProgressText')
+
+downloadBtn.addEventListener('click', async (event) => {
+  const url = downloadBtn.dataset.url
+  if (!url) return
+  event.preventDefault()
+  downloadBtn.classList.add('disabled')
+  try {
+    const response = await apiFetch(url)
+    if (!response.ok) {
+      const data = await parseJsonResponse(response)
+      throw new Error(data.error || '下载失败')
+    }
+    const blob = await response.blob()
+    const objectURL = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = objectURL
+    link.download = downloadBtn.download || 'results.zip'
+    link.click()
+    URL.revokeObjectURL(objectURL)
+  } catch (error) {
+    showResultError(error.message || String(error))
+  } finally {
+    downloadBtn.classList.remove('disabled')
+  }
+})
+
+cancelTaskBtn.addEventListener('click', async () => {
+  if (!activeTaskID || !confirm('确定取消当前任务吗？已处理的文件将保留在任务目录中。')) return
+  cancelTaskBtn.disabled = true
+  try {
+    const response = await apiFetch(API_BASE + '/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: activeTaskID })
+    })
+    const data = await parseJsonResponse(response)
+    if (!response.ok || data.error) throw new Error(data.error || '取消失败')
+    statusMsg.textContent = '正在取消任务...'
+  } catch (error) {
+    showResultError(error.message || String(error))
+  } finally {
+    cancelTaskBtn.disabled = false
+  }
+})
 const toolTabs = document.getElementById('toolTabs')
 const pageTitle = document.getElementById('pageTitle')
 const pageSubtitle = document.getElementById('pageSubtitle')
@@ -153,15 +216,37 @@ function displayPath(f) {
 function addFiles(files) {
   const cfg = tool()
   const existing = new Set(selectedFiles.map(fileKey))
+	const stats = { accepted: 0, unsupported: 0, duplicate: 0 }
   for (const f of files) {
     const name = f.webkitRelativePath || f.name
-    if (!cfg.isAllowed(name)) continue
+		if (!cfg.isAllowed(name)) {
+			stats.unsupported++
+			continue
+		}
     const key = fileKey(f)
-    if (existing.has(key)) continue
+		if (existing.has(key)) {
+			stats.duplicate++
+			continue
+		}
     existing.add(key)
     selectedFiles.push(f)
+		stats.accepted++
   }
   renderFileList()
+	return stats
+}
+
+function setUploadFeedback(message, isError = false) {
+  uploadSub.textContent = message
+  uploadSub.style.color = isError ? '#FF3B30' : ''
+}
+
+function describeAddResult(stats, warnings = []) {
+  const parts = [`已加入 ${stats.accepted} 个文件`]
+  if (stats.unsupported) parts.push(`跳过 ${stats.unsupported} 个不支持的文件`)
+  if (stats.duplicate) parts.push(`忽略 ${stats.duplicate} 个重复文件`)
+  if (warnings.length) parts.push(`跳过 ${warnings.length} 个无法读取的条目`)
+  return parts.join('；')
 }
 
 function switchTool(next) {
@@ -263,19 +348,27 @@ uploadZone.addEventListener('dragover', (e) => {
   e.preventDefault()
   uploadZone.classList.add('dragover')
 })
-uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'))
+uploadZone.addEventListener('dragleave', (e) => {
+  if (!uploadZone.contains(e.relatedTarget)) uploadZone.classList.remove('dragover')
+})
 uploadZone.addEventListener('drop', async (e) => {
   e.preventDefault()
   uploadZone.classList.remove('dragover')
   const items = e.dataTransfer?.items
   if (items && items.length > 0) {
-    const collected = await collectDroppedFiles(items)
-    if (collected.length > 0) {
-      addFiles(collected)
+    const { files, warnings, supportsDirectoryDrop } = await collectDroppedFiles(items)
+    if (files.length > 0) {
+      setUploadFeedback(describeAddResult(addFiles(files), warnings))
       return
     }
+    if (!supportsDirectoryDrop && e.dataTransfer.files.length === 0) {
+      setUploadFeedback('当前浏览器不支持拖入文件夹，请点击“选择文件夹”或使用 Chrome、Edge、Safari。', true)
+      return
+    }
+    if (warnings.length) setUploadFeedback(`未读取到可用文件；跳过 ${warnings.length} 个无法读取的条目。`, true)
   }
-  addFiles(e.dataTransfer.files)
+  const stats = addFiles(e.dataTransfer.files)
+  if (e.dataTransfer.files.length > 0) setUploadFeedback(describeAddResult(stats))
 })
 
 fileInput.addEventListener('change', (e) => {
@@ -291,37 +384,53 @@ folderInput.addEventListener('change', (e) => {
 async function collectDroppedFiles(items) {
   const files = []
   const tasks = []
+	const warnings = []
+	let supportsDirectoryDrop = false
   for (const item of items) {
     const entry = item.webkitGetAsEntry?.()
-    if (entry) tasks.push(walkEntry(entry, ''))
+		if (entry) {
+			supportsDirectoryDrop = true
+			tasks.push(walkEntry(entry, '', warnings))
+		}
   }
-  const nested = await Promise.all(tasks)
-  for (const batch of nested) files.push(...batch)
-  return files
+	const nested = await Promise.all(tasks)
+	for (const batch of nested) files.push(...batch)
+	return { files, warnings, supportsDirectoryDrop }
 }
 
-async function walkEntry(entry, prefix) {
+async function walkEntry(entry, prefix, warnings) {
   if (entry.isFile) {
-    const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
-    file.webkitRelativePath = prefix + entry.name
-    return [file]
+		try {
+			const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
+			const relativePath = prefix + entry.name
+			try {
+				Object.defineProperty(file, 'webkitRelativePath', { value: relativePath, configurable: true })
+			} catch {}
+			return [file]
+		} catch {
+			warnings.push(prefix + entry.name)
+			return []
+		}
   }
   if (!entry.isDirectory) return []
 
-  const reader = entry.createReader()
-  const children = []
-  const readBatch = () => new Promise((resolve, reject) => reader.readEntries(resolve, reject))
+	try {
+		const reader = entry.createReader()
+		const children = []
+		const readBatch = () => new Promise((resolve, reject) => reader.readEntries(resolve, reject))
 
-  while (true) {
-    const batch = await readBatch()
-    if (!batch.length) break
-    children.push(...batch)
+		while (true) {
+			const batch = await readBatch()
+			if (!batch.length) break
+			children.push(...batch)
+		}
+
+		const nested = await Promise.all(children.map(child => walkEntry(child, prefix + entry.name + '/', warnings)))
+		return nested.flat()
+	} catch {
+		warnings.push(prefix + entry.name + '/')
+		return []
   }
-
-  const nested = await Promise.all(
-    children.map(child => walkEntry(child, prefix + entry.name + '/'))
-  )
-  return nested.flat()
 }
 
 clearBtn.addEventListener('click', async () => {
@@ -331,7 +440,7 @@ clearBtn.addEventListener('click', async () => {
 
   clearBtn.disabled = true
   try {
-    const res = await fetch(API_BASE + '/clear', { method: 'POST' })
+    const res = await apiFetch(API_BASE + '/clear', { method: 'POST' })
     const data = await parseJsonResponse(res)
     if (!res.ok || data.error) {
       throw new Error(data.error || '清空失败')
@@ -371,13 +480,15 @@ uploadBtn.addEventListener('click', async () => {
   })
 
   try {
-    const res = await fetch(API_BASE + cfg.uploadUrl, {
+    const res = await apiFetch(API_BASE + cfg.uploadUrl, {
       method: 'POST',
       body: formData
     })
     const data = await parseJsonResponse(res)
     if (!res.ok || data.error) throw new Error(data.error || '上传失败')
     const taskId = data.task_id
+    activeTaskID = taskId
+    cancelTaskBtn.style.display = 'inline-flex'
     const total = data.count || selectedFiles.length
 
     setOverlayText(cfg.loadingProcess, cfg.loadingSub, {
@@ -385,7 +496,7 @@ uploadBtn.addEventListener('click', async () => {
       label: total > 0 ? `0 / ${total}` : '0%'
     })
 
-    const startRes = await fetch(API_BASE + cfg.startUrl, {
+    const startRes = await apiFetch(API_BASE + cfg.startUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ task_id: taskId })
@@ -397,9 +508,13 @@ uploadBtn.addEventListener('click', async () => {
 
     const finalStatus = await pollStatus(taskId, total, cfg)
     setLoading(false)
+    activeTaskID = ''
+    cancelTaskBtn.style.display = 'none'
     showResultSuccess(taskId, finalStatus, cfg)
   } catch (err) {
     setLoading(false)
+    activeTaskID = ''
+    cancelTaskBtn.style.display = 'none'
     showResultError(err.message || String(err))
   } finally {
     uploadBtn.disabled = false
@@ -410,7 +525,7 @@ async function pollStatus(taskId, total, cfg) {
   return new Promise((resolve, reject) => {
     const poll = async () => {
       try {
-        const statusRes = await fetch(API_BASE + '/status/' + taskId)
+        const statusRes = await apiFetch(API_BASE + '/status/' + taskId)
         const s = await parseJsonResponse(statusRes)
         const totalFiles = s.total || total
         const done = s.current || 0
@@ -424,6 +539,10 @@ async function pollStatus(taskId, total, cfg) {
         }
         if (s.status === 'failed') {
           reject(new Error(s.message || '处理失败'))
+          return
+        }
+        if (s.status === 'cancelled') {
+          reject(new Error(s.message || '任务已取消'))
           return
         }
         setTimeout(poll, 1200)
@@ -441,13 +560,14 @@ async function showResultSuccess(taskId, statusObj, cfg) {
   statusText.className = 'status completed'
   statusMsg.textContent = statusObj.message || cfg.successMsg
 
-  downloadBtn.href = API_BASE + '/download/' + taskId
+  downloadBtn.href = '#'
+  downloadBtn.dataset.url = API_BASE + '/download/' + taskId
   downloadBtn.download = cfg.downloadName
   downloadBtn.textContent = cfg.downloadText
   downloadBtn.style.display = 'inline-block'
 
   try {
-    const res = await fetch(API_BASE + cfg.resultsUrl(taskId))
+    const res = await apiFetch(API_BASE + cfg.resultsUrl(taskId))
     const rows = await parseJsonResponse(res)
     cfg.renderResults(rows)
   } catch (e) {
